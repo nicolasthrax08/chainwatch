@@ -24,10 +24,7 @@ import jwt
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
 ) or os.environ.get("POSTGRES_CONNECTION_STRING")
-JWT_SECRET = os.environ.get(
-    "JWT_SECRET",
-    secrets.token_hex(32)
-)
+JWT_SECRET = os.environ.get("JWT_SECRET") or "fixed-secret-please-change"
 ETHERSCAN_API_KEY = os.environ.get("ETHERSCAN_API_KEY", "")
 SOLSCAN_API_KEY = os.environ.get("SOLSCAN_API_KEY", "")
 BLOCKCHAIR_API_KEY = os.environ.get("BLOCKCHAIR_API_KEY", "")
