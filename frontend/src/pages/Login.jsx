@@ -22,7 +22,7 @@ function Login({ onLogin }) {
     try {
       // Step 1: Get challenge message
       const challenge = await fetch(
-        `${API_BASE}/auth/challenge?wallet_address=${encodeURIComponent(walletAddress)}`
+        `${API_BASE}/api/auth/challenge?wallet_address=${encodeURIComponent(walletAddress)}`
       ).then(r => r.json());
 
       // Step 2: In a real app, the user would sign this with their wallet
