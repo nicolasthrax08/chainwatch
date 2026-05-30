@@ -369,8 +369,7 @@ async def verify_signature(req: WalletConnectRequest):
         user_dict = {"wallet_address": addr,
                      "created_at": u["created_at"].isoformat() if isinstance(u["created_at"], datetime) else u["created_at"]}
 
-    # After user creation, ensure the login wallet is tracked
-    # Check if the wallet already exists for this user; if not, add it.
+    # Auto‑add the logged‑in wallet if it doesn’t exist yet
     if db_pool is not None:
         async with db_pool.acquire() as conn:
             existing = await conn.fetchrow(
@@ -383,7 +382,6 @@ async def verify_signature(req: WalletConnectRequest):
                     user["id"], addr, 'eth', '', False, True
                 )
     else:
-        # In‑memory store – add wallet if missing
         if not any(w for w in _wallets if w["address"].lower() == addr.lower() and str(w.get("user_id")) == str(addr)):
             _wallets.append({
                 "id": _fake_id(),
@@ -395,6 +393,7 @@ async def verify_signature(req: WalletConnectRequest):
                 "is_mine": True,
                 "created_at": datetime.utcnow(),
             })
+    return {"token": token, "user": user_dict}
 
 
 
