@@ -1,0 +1,6 @@
+$schema: https://zeabur.com/schema.json
+backer: thraxxx
+template: docker
+name: chainwatch
+description: ChainWatch - Crypto Portfolio Tracker
+icon: https://cdn-icons-png.flaticon.com/512/6485/6485010.png
