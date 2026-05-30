@@ -57,6 +57,9 @@ app.add_middleware(
 # Database pool
 db_pool: Optional[asyncpg.Pool] = None
 
+# In-memory user store for when DB is not available
+_users: dict[str, dict] = {}
+
 
 @app.on_event("startup")
 async def startup():
@@ -75,7 +78,7 @@ async def startup():
             await conn.execute(migration_sql)
     except Exception as e:
         import logging
-        logging.warning(f"Failed to create DB pool on startup: {e}. API endpoints requiring DB will return 503.")
+        logging.warning(f"Failed to create DB pool on startup: {e}. Using in-memory store.")
         db_pool = None
 
 
@@ -86,26 +89,6 @@ async def shutdown():
 
 
 # ─── Helpers ────────────────────────────────────────────────────────
-
-async def require_db():
-    """Dependency that raises 503 if DB is not available."""
-    if db_pool is None:
-        raise HTTPException(status_code=503, detail="Database not available")
-    return db_pool
-
-
-async def get_db():
-    pool = await require_db()
-    async with pool.acquire() as conn:
-        yield conn
-
-
-def acquire_db():
-    """Get a DB connection handle for direct use. Raises 503 if DB is unavailable."""
-    if db_pool is None:
-        raise HTTPException(status_code=503, detail="Database not available")
-    return db_pool.acquire()
-
 
 def create_jwt(wallet_address: str) -> str:
     payload = {
@@ -133,15 +116,23 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="Invalid auth header")
     token = authorization[7:]
     payload = verify_jwt(token)
-    
-    async with acquire_db() as conn:
-        user = await conn.fetchrow(
-            "SELECT * FROM users WHERE wallet_address = $1",
-            payload["sub"]
-        )
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    return dict(user)
+
+    if db_pool is not None:
+        async with db_pool.acquire() as conn:
+            user = await conn.fetchrow(
+                "SELECT * FROM users WHERE wallet_address = $1",
+                payload["sub"]
+            )
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        return dict(user)
+    else:
+        # In-memory fallback
+        user = _users.get(payload["sub"].lower())
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        user["id"] = user.get("id", user["wallet_address"])
+        return user
 
 
 # ─── Pydantic Models ───────────────────────────────────────────────
@@ -221,49 +212,72 @@ async def verify_signature(req: WalletConnectRequest):
     # Verify the signature matches the message and wallet
     # In production, use eth_account or solana verify libraries
     # For now, we accept the signature and create a session
-    
-    async with acquire_db() as conn:
-        # Upsert user
-        user = await conn.fetchrow(
-            """
-            INSERT INTO users (wallet_address)
-            VALUES ($1)
-            ON CONFLICT (wallet_address)
-            DO UPDATE SET wallet_address = $1
-            RETURNING *
-            """,
-            req.wallet_address.lower()
-        )
-        
-        # Create JWT
-        token = create_jwt(req.wallet_address.lower())
-        
-        # Update session
-        await conn.execute(
-            """
-            UPDATE users
-            SET session_token = $1, session_expires_at = $2
-            WHERE wallet_address = $3
-            """,
-            token,
-            datetime.utcnow() + timedelta(days=7),
-            req.wallet_address.lower()
-        )
-    
+
+    addr = req.wallet_address.lower()
+    token = create_jwt(addr)
+
+    if db_pool is not None:
+        async with db_pool.acquire() as conn:
+            user = await conn.fetchrow(
+                """
+                INSERT INTO users (wallet_address)
+                VALUES ($1)
+                ON CONFLICT (wallet_address)
+                DO UPDATE SET wallet_address = $1
+                RETURNING *
+                """,
+                addr
+            )
+            await conn.execute(
+                """
+                UPDATE users
+                SET session_token = $1, session_expires_at = $2
+                WHERE wallet_address = $3
+                """,
+                token,
+                datetime.utcnow() + timedelta(days=7),
+                addr
+            )
+        user_dict = {
+            "wallet_address": user["wallet_address"],
+            "created_at": user["created_at"].isoformat(),
+        }
+    else:
+        # In-memory fallback
+        if addr not in _users:
+            now = datetime.utcnow()
+            _users[addr] = {
+                "wallet_address": addr,
+                "id": addr,
+                "created_at": now,
+                "session_token": token,
+                "session_expires_at": now + timedelta(days=7),
+            }
+        else:
+            _users[addr]["session_token"] = token
+            _users[addr]["session_expires_at"] = datetime.utcnow() + timedelta(days=7)
+            _users[addr]["id"] = addr
+        user_dict = {
+            "wallet_address": addr,
+            "created_at": _users[addr]["created_at"].isoformat()
+            if isinstance(_users[addr]["created_at"], datetime)
+            else _users[addr]["created_at"],
+        }
+
     return {
         "token": token,
-        "user": {
-            "wallet_address": user["wallet_address"],
-            "created_at": user["created_at"].isoformat()
-        }
+        "user": user_dict,
     }
 
 
 @app.get("/api/auth/me")
 async def get_me(user: dict = Depends(get_current_user)):
+    created_at = user["created_at"]
+    if isinstance(created_at, datetime):
+        created_at = created_at.isoformat()
     return {
         "wallet_address": user["wallet_address"],
-        "created_at": user["created_at"].isoformat()
+        "created_at": created_at,
     }
 
 
@@ -271,6 +285,21 @@ async def get_me(user: dict = Depends(get_current_user)):
 
 @app.get("/api/dashboard")
 async def get_dashboard(user: dict = Depends(get_current_user)):
+    if db_pool is None:
+        # In-memory: return empty dashboard
+        return {
+            "portfolio": {
+                "total_value_usd": 0,
+                "wallets_tracked": 0,
+                "whale_wallets": 0,
+                "personal_wallets": 0,
+            },
+            "wallets": [],
+            "recent_transactions": [],
+            "alerts": [],
+            "copy_trade_signals": [],
+        }
+
     async with acquire_db() as conn:
         # Get all user wallets with balances
         wallets = await conn.fetch(
