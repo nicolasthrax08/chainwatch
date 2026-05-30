@@ -35,7 +35,7 @@ function Login({ onLogin }) {
       setStep('verifying');
 
       // Step 3: Verify signature and get JWT
-      const auth = await fetch(`${API_BASE}/auth/verify`, {
+      const auth = await fetch(`${API_BASE}/api/auth/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
