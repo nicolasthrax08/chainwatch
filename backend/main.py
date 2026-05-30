@@ -369,7 +369,33 @@ async def verify_signature(req: WalletConnectRequest):
         user_dict = {"wallet_address": addr,
                      "created_at": u["created_at"].isoformat() if isinstance(u["created_at"], datetime) else u["created_at"]}
 
-    return {"token": token, "user": user_dict}
+    # After user creation, ensure the login wallet is tracked
+    # Check if the wallet already exists for this user; if not, add it.
+    if db_pool is not None:
+        async with db_pool.acquire() as conn:
+            existing = await conn.fetchrow(
+                "SELECT * FROM wallets WHERE address = $1 AND user_id = $2",
+                addr, user["id"]
+            )
+            if not existing:
+                await conn.execute(
+                    "INSERT INTO wallets (user_id, address, chain, label, is_whale, is_mine) VALUES ($1, $2, $3, $4, $5, $6)",
+                    user["id"], addr, 'eth', '', False, True
+                )
+    else:
+        # In‑memory store – add wallet if missing
+        if not any(w for w in _wallets if w["address"].lower() == addr.lower() and str(w.get("user_id")) == str(addr)):
+            _wallets.append({
+                "id": _fake_id(),
+                "user_id": addr,
+                "address": addr,
+                "chain": "eth",
+                "label": "",
+                "is_whale": False,
+                "is_mine": True,
+                "created_at": datetime.utcnow(),
+            })
+
 
 
 @app.get("/api/auth/me")
@@ -383,6 +409,7 @@ async def get_me(user: dict = Depends(get_current_user)):
 # ─── Dashboard ──────────────────────────────────────────────────────
 
 @app.get("/api/dashboard")
+@app.get("/api/dashboard/")
 async def get_dashboard(user: dict = Depends(get_current_user)):
     uid = user.get("id", "")
     async with _get_db_conn() as conn:
