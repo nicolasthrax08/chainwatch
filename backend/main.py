@@ -138,11 +138,16 @@ def verify_jwt(token: str) -> dict:
 
 
 async def get_current_user(
-    authorization: str = Header(...)
+    authorization: str = Header(None)
 ) -> dict:
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid auth header")
-    token = authorization[7:]
+    """Extract the JWT token from the Authorization header.
+    Accepts either the standard "Bearer <token>" format or a raw token string.
+    """
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing auth header")
+    token = authorization
+    if authorization.startswith("Bearer "):
+        token = authorization[7:]
     payload = verify_jwt(token)
 
     if db_pool is not None:
@@ -627,6 +632,11 @@ if os.path.isdir(_static_dir):
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):
+        """
+        Catch‑all route for the SPA.
+        * If the request targets the API (starts with `api/`) we return 404.
+        * Otherwise we always serve the built `index.html` so the client‑side router works.
+        """
         if full_path.startswith("api/"):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
         return FileResponse(os.path.join(_static_dir, "index.html"))
