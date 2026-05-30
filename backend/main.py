@@ -68,6 +68,11 @@ async def startup():
             max_size=10,
             command_timeout=30
         )
+        # Run initial migration if DB is available
+        async with db_pool.acquire() as conn:
+            migration_path = os.path.join(os.path.dirname(__file__), "migrations", "001_initial_schema.sql")
+            migration_sql = open(migration_path).read()
+            await conn.execute(migration_sql)
     except Exception as e:
         import logging
         logging.warning(f"Failed to create DB pool on startup: {e}. API endpoints requiring DB will return 503.")
