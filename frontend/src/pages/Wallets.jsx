@@ -77,6 +77,15 @@ function Wallets({ token }) {
     }
   };
 
+  const handleRefresh = async (id) => {
+    try {
+      await apiFetch(`/wallets/${id}/refresh`, token, { method: 'POST' });
+      load();
+    } catch (e) {
+      alert(e.message);
+    }
+  };
+
   const addSuggestion = (s) => {
     setForm({
       address: s.address,
@@ -226,33 +235,38 @@ function Wallets({ token }) {
                   <th>Chain</th>
                   <th>Label</th>
                   <th>Address</th>
+                  <th>Balance (USD)</th>
                   <th>Type</th>
                   <th>Added</th>
                   <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {wallets.map(w => (
-                  <tr key={w.id}>
-                    <td>
-                      <span className={`chain-dot ${w.chain}`} />
-                      {w.chain.toUpperCase()}
-                    </td>
-                    <td>{w.label || '—'}</td>
-                    <td className="address">{truncateAddress(w.address)}</td>
-                    <td>
-                      {w.is_whale && <span className="tx-badge receive" style={{ marginRight: '4px' }}>Whale</span>}
-                      {w.is_mine && <span className="tx-badge swap">Mine</span>}
-                      {!w.is_whale && !w.is_mine && <span style={{ color: '#8b8f98' }}>Read-only</span>}
-                    </td>
-                    <td className="time-ago">{new Date(w.created_at).toLocaleDateString()}</td>
-                    <td>
-                      <button className="btn btn-danger btn-sm" onClick={() => handleDelete(w.id)}>
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                  {wallets.map(w => (
+                    <tr key={w.id}>
+                      <td>
+                        <span className={`chain-dot ${w.chain}`} />
+                        {w.chain.toUpperCase()}
+                      </td>
+                      <td>{w.label || '—'}</td>
+                      <td className="address">{truncateAddress(w.address)}</td>
+                      <td>${w.balance_usd > 0 ? w.balance_usd.toLocaleString() : '—'}</td>
+                      <td>
+                        {w.is_whale && <span className="tx-badge receive" style={{ marginRight: '4px' }}>Whale</span>}
+                        {w.is_mine && <span className="tx-badge swap">Mine</span>}
+                        {!w.is_whale && !w.is_mine && <span style={{ color: '#8b8f98' }}>Read-only</span>}
+                      </td>
+                      <td className="time-ago">{new Date(w.created_at).toLocaleDateString()}</td>
+                      <td>
+                        <button className="btn btn-secondary btn-sm" onClick={() => handleRefresh(w.id)} style={{ marginRight: '4px' }}>
+                          Refresh
+                        </button>
+                        <button className="btn btn-danger btn-sm" onClick={() => handleDelete(w.id)}>
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
               </tbody>
             </table>
           </div>

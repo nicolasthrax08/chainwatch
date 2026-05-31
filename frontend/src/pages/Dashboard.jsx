@@ -113,7 +113,7 @@ function Dashboard({ token }) {
                       </td>
                       <td>{w.label || '—'}</td>
                       <td className="address">{truncateAddress(w.address)}</td>
-                      <td>${w.balance_usd.toLocaleString()}</td>
+                      <td>${w.balance_usd > 0 ? w.balance_usd.toLocaleString() : '—'}</td>
                     </tr>
                   ))}
                 </tbody>

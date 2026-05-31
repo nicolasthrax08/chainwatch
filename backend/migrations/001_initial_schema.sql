@@ -100,9 +100,9 @@ INSERT INTO whale_suggestions (chain, address, label, source) VALUES
 ('sol', '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8', 'Raydium AMM', 'public'),
 ('sol', 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', 'Jupiter Aggregator', 'public'),
 -- Bitcoin whales
-('bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh', 'Binance BTC', 'public'),
-('bc1qazcm763858nkj2dj986etajv6wquslv8uxwczt', 'Bitfinex Cold', 'public'),
-('34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo', 'Binance Cold BTC', 'public'),
-('bc1qsxdxm0v65y8d4jw24k9vcf8nq9g7qkvq2uqygm', 'Kraken BTC', 'public'),
-('1P5ZEDWTyMmXPXjVZM295zXq4Y5q1gGq1q', 'Unknown Whale', 'public')
+('btc', 'bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh', 'Binance BTC', 'public'),
+('btc', 'bc1qazcm763858nkj2dj986etajv6wquslv8uxwczt', 'Bitfinex Cold', 'public'),
+('btc', '34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo', 'Binance Cold BTC', 'public'),
+('btc', 'bc1qsxdxm0v65y8d4jw24k9vcf8nq9g7qkvq2uqygm', 'Kraken BTC', 'public'),
+('btc', '1P5ZEDWTyMmXPXjVZM295zXq4Y5q1gGq1q', 'Unknown Whale', 'public')
 ON CONFLICT DO NOTHING;

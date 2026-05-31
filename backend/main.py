@@ -3,12 +3,15 @@ ChainWatch - Crypto Portfolio Tracker
 FastAPI Backend
 """
 import os
+import re
 import uuid
 import hashlib
 import time
 import json
 import httpx
 import secrets
+import asyncio
+import logging
 from datetime import datetime, timedelta
 from typing import Optional, List
 from decimal import Decimal
@@ -19,6 +22,11 @@ from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 import asyncpg
 import jwt
+
+# Import blockchain services
+from services.blockchain import EtherscanClient, SolscanClient, BlockchairClient, get_eth_price_usd
+
+logger = logging.getLogger(__name__)
 
 # Configuration
 DATABASE_URL = os.environ.get(
@@ -60,6 +68,9 @@ _wallets: list[dict] = []
 _alerts: list[dict] = []
 _fake_id_counter = 0
 
+# Price cache (refreshed periodically)
+_price_cache: dict = {"ETH": 0, "SOL": 0, "BTC": 0, "timestamp": 0}
+
 
 def _fake_id() -> str:
     global _fake_id_counter
@@ -84,13 +95,14 @@ _WHALE_SUGGESTIONS: list[dict] = [
 ]
 
 
+# ─── Startup / Shutdown ──────────────────────────────────────────────
+
 @app.on_event("startup")
 async def startup():
     global db_pool
     db_url = DATABASE_URL
     if not db_url:
-        import logging
-        logging.warning("No DATABASE_URL set. Using in-memory store. Data will not persist across restarts.")
+        logger.warning("No DATABASE_URL set. Using in-memory store. Data will not persist across restarts.")
         db_pool = None
         return
     try:
@@ -104,9 +116,21 @@ async def startup():
             migration_path = os.path.join(os.path.dirname(__file__), "migrations", "001_initial_schema.sql")
             migration_sql = open(migration_path).read()
             await conn.execute(migration_sql)
+            # Add balance_usd column if it doesn't exist (migration 002)
+            try:
+                await conn.execute(
+                    "ALTER TABLE wallets ADD COLUMN IF NOT EXISTS balance_usd DECIMAL(20, 2) DEFAULT 0.0"
+                )
+                await conn.execute(
+                    "ALTER TABLE wallets ADD COLUMN IF NOT EXISTS balance_native DECIMAL(30, 18) DEFAULT 0.0"
+                )
+                await conn.execute(
+                    "ALTER TABLE wallets ADD COLUMN IF NOT EXISTS last_balance_update TIMESTAMP WITH TIME ZONE"
+                )
+            except Exception as e:
+                logger.warning(f"Could not add balance columns: {e}")
     except Exception as e:
-        import logging
-        logging.warning(f"Failed to connect to DB: {e}. Using in-memory store.")
+        logger.warning(f"Failed to connect to DB: {e}. Using in-memory store.")
         db_pool = None
 
 
@@ -117,6 +141,27 @@ async def shutdown():
 
 
 # ─── Helpers ────────────────────────────────────────────────────────
+
+def detect_chain(address: str) -> str:
+    """Auto-detect blockchain chain from wallet address format.
+
+    Returns one of: 'eth', 'sol', 'btc'
+    Defaults to 'eth' for unrecognizable addresses.
+    """
+    addr = address.strip()
+    # Bitcoin: bech32 (bc1...), P2PKH (1...), P2SH (3...)
+    if re.match(r"^(bc1)[a-zA-HJ-NP-Z0-9]{25,62}$", addr):
+        return "btc"
+    if re.match(r"^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$", addr):
+        return "btc"
+    # Ethereum: 0x followed by 40 hex chars
+    if re.match(r"^0x[a-fA-F0-9]{40}$", addr):
+        return "eth"
+    # Solana: base58, 32-44 chars (no 0/O/I/l to avoid ambiguity)
+    if re.match(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$", addr):
+        return "sol"
+    return "eth"  # default fallback for unknown formats
+
 
 def create_jwt(wallet_address: str) -> str:
     payload = {
@@ -174,6 +219,69 @@ def _get_db_conn():
     return _FakePool()
 
 
+async def _refresh_prices() -> dict:
+    """Fetch current crypto prices from CoinGecko. Returns dict like {'ETH': 3500, 'SOL': 150, 'BTC': 65000}."""
+    global _price_cache
+    now = time.time()
+    # Cache for 60 seconds
+    if now - _price_cache.get("timestamp", 0) < 60 and _price_cache.get("ETH", 0) > 0:
+        return _price_cache
+    try:
+        prices = await get_eth_price_usd()
+        prices["timestamp"] = now
+        _price_cache = prices
+        return prices
+    except Exception as e:
+        logger.warning(f"Price fetch failed: {e}")
+        return _price_cache
+
+
+async def _fetch_wallet_balance(address: str, chain: str) -> dict:
+    """Fetch on-chain balance for a wallet address.
+    Returns {'balance_native': float, 'balance_usd': float, 'symbol': str}.
+    """
+    prices = await _refresh_prices()
+    result = {"balance_native": 0.0, "balance_usd": 0.0, "symbol": chain.upper()}
+
+    try:
+        if chain == "eth":
+            client = EtherscanClient()
+            try:
+                bal = await client.get_eth_balance(address)
+                result["balance_native"] = bal.get("balance_eth", 0)
+                result["symbol"] = "ETH"
+                result["balance_usd"] = result["balance_native"] * prices.get("ETH", 0)
+            finally:
+                await client.close()
+
+        elif chain == "sol":
+            client = SolscanClient()
+            try:
+                bal = await client.get_balance(address)
+                result["balance_native"] = bal.get("balance_sol", 0)
+                result["symbol"] = "SOL"
+                result["balance_usd"] = result["balance_native"] * prices.get("SOL", 0)
+            finally:
+                await client.close()
+
+        elif chain == "btc":
+            client = BlockchairClient()
+            try:
+                bal = await client.get_balance(address)
+                result["balance_native"] = bal.get("balance_btc", 0)
+                result["symbol"] = "BTC"
+                result["balance_usd"] = result["balance_native"] * prices.get("BTC", 0)
+            finally:
+                await client.close()
+
+    except Exception as e:
+        logger.warning(f"Balance fetch failed for {address} ({chain}): {e}")
+
+    return result
+
+
+# ─── Fake in-memory DB for development / no-DB mode ─────────────────
+
 class _FakeConn:
     async def fetchrow(self, query: str, *args):
         ql = query.lower()
@@ -191,6 +299,9 @@ class _FakeConn:
                  "label": args[3] if len(args) > 3 else "",
                  "is_whale": args[4] if len(args) > 4 else False,
                  "is_mine": args[5] if len(args) > 5 else False,
+                 "balance_usd": 0.0,
+                 "balance_native": 0.0,
+                 "last_balance_update": None,
                  "created_at": now}
             _wallets.append(w)
             return w
@@ -213,8 +324,10 @@ class _FakeConn:
             wid = args[0]
             for w in _wallets:
                 if str(w["id"]) == str(wid):
-                    if len(args) > 2 and args[1]: w["label"] = args[1]
-                    if len(args) > 3 and args[2] is not None: w["is_mine"] = args[2]
+                    if len(args) > 2 and args[1] and isinstance(args[1], str):
+                        w["label"] = args[1]
+                    if len(args) > 3 and args[2] is not None and isinstance(args[2], bool):
+                        w["is_mine"] = args[2]
             return None
         if "update alerts set" in ql:
             aid = args[0]
@@ -289,6 +402,30 @@ class _FakePool:
         return _FakeConn()
     async def __aexit__(self, *args):
         pass
+
+
+def _wallet_to_dict(w: dict) -> dict:
+    """Safely convert a wallet record (dict or asyncpg Record) to a clean dict for the API."""
+    balance_usd = float(w.get("balance_usd") or 0)
+    balance_native = float(w.get("balance_native") or 0)
+    created_at = w.get("created_at")
+    if isinstance(created_at, datetime):
+        created_at = created_at.isoformat()
+    last_update = w.get("last_balance_update")
+    if isinstance(last_update, datetime):
+        last_update = last_update.isoformat()
+    return {
+        "id": str(w["id"]),
+        "address": w["address"],
+        "chain": w.get("chain", "eth"),
+        "label": w.get("label", ""),
+        "is_whale": w.get("is_whale", False),
+        "is_mine": w.get("is_mine", False),
+        "balance_usd": round(balance_usd, 2),
+        "balance_native": round(balance_native, 8),
+        "last_balance_update": last_update,
+        "created_at": str(created_at) if created_at else "",
+    }
 
 
 # ─── Pydantic Models ───────────────────────────────────────────────
@@ -371,7 +508,8 @@ async def verify_signature(req: WalletConnectRequest):
         user_dict = {"wallet_address": addr,
                      "created_at": u["created_at"].isoformat() if isinstance(u["created_at"], datetime) else u["created_at"]}
 
-    # Auto‑add the logged‑in wallet if it doesn’t exist yet
+    # Auto‑add the logged‑in wallet if it doesn't exist yet
+    detected_chain = detect_chain(addr)
     if db_pool is not None:
         async with db_pool.acquire() as conn:
             existing = await conn.fetchrow(
@@ -379,9 +517,13 @@ async def verify_signature(req: WalletConnectRequest):
                 addr, user["id"]
             )
             if not existing:
+                # Fetch real balance
+                bal = await _fetch_wallet_balance(addr, detected_chain)
                 await conn.execute(
-                    "INSERT INTO wallets (user_id, address, chain, label, is_whale, is_mine) VALUES ($1, $2, $3, $4, $5, $6)",
-                    user["id"], addr, 'eth', '', False, True
+                    "INSERT INTO wallets (user_id, address, chain, label, is_whale, is_mine, balance_usd, balance_native, last_balance_update) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                    user["id"], addr, detected_chain, '', False, True,
+                    bal["balance_usd"], bal["balance_native"], datetime.utcnow()
                 )
     else:
         if not any(w for w in _wallets if w["address"].lower() == addr.lower() and str(w.get("user_id")) == str(addr)):
@@ -389,12 +531,23 @@ async def verify_signature(req: WalletConnectRequest):
                 "id": _fake_id(),
                 "user_id": addr,
                 "address": addr,
-                "chain": "eth",
+                "chain": detected_chain,
                 "label": "",
                 "is_whale": False,
                 "is_mine": True,
+                "balance_usd": 0.0,
+                "balance_native": 0.0,
+                "last_balance_update": None,
                 "created_at": datetime.utcnow(),
             })
+            # Fetch real balance in background
+            try:
+                bal = await _fetch_wallet_balance(addr, detected_chain)
+                _wallets[-1]["balance_usd"] = bal["balance_usd"]
+                _wallets[-1]["balance_native"] = bal["balance_native"]
+                _wallets[-1]["last_balance_update"] = datetime.utcnow()
+            except Exception:
+                pass
     return {"token": token, "user": user_dict}
 
 
@@ -417,17 +570,37 @@ async def get_dashboard(user: dict = Depends(get_current_user)):
         wallets_raw = await conn.fetch("SELECT * FROM wallets WHERE user_id = $1 ORDER BY created_at DESC", uid)
         alerts_raw = await conn.fetch("SELECT * FROM alerts WHERE user_id = $1 ORDER BY created_at DESC", uid)
 
+    # Refresh balances for all wallets
+    for w in wallets_raw:
+        chain = w.get("chain", "eth")
+        addr = w["address"]
+        try:
+            bal = await _fetch_wallet_balance(addr, chain)
+            if db_pool is not None:
+                async with db_pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE wallets SET balance_usd = $1, balance_native = $2, last_balance_update = $3 WHERE id = $4",
+                        bal["balance_usd"], bal["balance_native"], datetime.utcnow(), w["id"]
+                    )
+            else:
+                for fw in _wallets:
+                    if str(fw["id"]) == str(w["id"]):
+                        fw["balance_usd"] = bal["balance_usd"]
+                        fw["balance_native"] = bal["balance_native"]
+                        fw["last_balance_update"] = datetime.utcnow()
+        except Exception as e:
+            logger.warning(f"Balance refresh failed for {addr}: {e}")
+
+    # Re-read after refresh
+    async with _get_db_conn() as conn:
+        wallets_raw = await conn.fetch("SELECT * FROM wallets WHERE user_id = $1 ORDER BY created_at DESC", uid)
+
     wallets_out = []
     total_value = 0.0
     for w in wallets_raw:
-        bal = float(w.get("balance_usd") or 0)
-        total_value += bal
-        wallets_out.append({
-            "id": str(w["id"]), "address": w["address"], "chain": w["chain"],
-            "label": w.get("label", ""), "is_whale": w.get("is_whale", False),
-            "is_mine": w.get("is_mine", False), "balance_usd": round(bal, 2),
-            "created_at": w["created_at"].isoformat() if isinstance(w.get("created_at"), datetime) else str(w.get("created_at","")),
-        })
+        wd = _wallet_to_dict(w)
+        total_value += wd["balance_usd"]
+        wallets_out.append(wd)
 
     alerts_out = []
     for a in alerts_raw:
@@ -457,29 +630,35 @@ async def list_wallets(user: dict = Depends(get_current_user)):
     uid = user.get("id", "")
     async with _get_db_conn() as conn:
         rows = await conn.fetch("SELECT * FROM wallets WHERE user_id = $1 ORDER BY created_at DESC", uid)
-    return {"wallets": [{
-        "id": str(w["id"]), "address": w["address"], "chain": w["chain"],
-        "label": w.get("label", ""), "is_whale": w.get("is_whale", False),
-        "is_mine": w.get("is_mine", False),
-        "created_at": w["created_at"].isoformat() if isinstance(w.get("created_at"), datetime) else str(w.get("created_at","")),
-    } for w in rows]}
+    return {"wallets": [_wallet_to_dict(w) for w in rows]}
 
 
 @app.post("/api/wallets")
 async def add_wallet(req: WalletAddRequest, user: dict = Depends(get_current_user)):
     uid = user.get("id", "")
-    async with _get_db_conn() as conn:
-        row = await conn.fetchrow(
-            "INSERT INTO wallets (user_id, address, chain, label, is_whale, is_mine) "
-            "VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
-            uid, req.address, req.chain, req.label, req.is_whale, req.is_mine
-        )
-    return {"wallet": {
-        "id": str(row["id"]), "address": row["address"], "chain": row["chain"],
-        "label": row.get("label", ""), "is_whale": row.get("is_whale", False),
-        "is_mine": row.get("is_mine", False),
-        "created_at": row["created_at"].isoformat() if isinstance(row.get("created_at"), datetime) else str(row.get("created_at","")),
-    }}
+
+    # Fetch real balance before saving
+    bal = await _fetch_wallet_balance(req.address, req.chain)
+    now = datetime.utcnow()
+
+    if db_pool is not None:
+        async with _get_db_conn() as conn:
+            row = await conn.fetchrow(
+                "INSERT INTO wallets (user_id, address, chain, label, is_whale, is_mine, balance_usd, balance_native, last_balance_update) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *",
+                uid, req.address, req.chain, req.label, req.is_whale, req.is_mine,
+                bal["balance_usd"], bal["balance_native"], now
+            )
+    else:
+        row = {
+            "id": _fake_id(), "user_id": uid, "address": req.address,
+            "chain": req.chain, "label": req.label,
+            "is_whale": req.is_whale, "is_mine": req.is_mine,
+            "balance_usd": bal["balance_usd"], "balance_native": bal["balance_native"],
+            "last_balance_update": now, "created_at": now,
+        }
+        _wallets.append(row)
+    return {"wallet": _wallet_to_dict(row)}
 
 
 @app.put("/api/wallets/{wallet_id}")
@@ -497,13 +676,8 @@ async def update_wallet(wallet_id: str, req: WalletUpdateRequest, user: dict = D
             set_clause = ", ".join(f"{k} = ${i+3}" for i, k in enumerate(updates))
             await conn.execute(f"UPDATE wallets SET {set_clause} WHERE id = $1 AND user_id = $2",
                                wallet_id, uid, *updates.values())
-        row = await conn.fetchrow("SELECT * FROM wallets WHERE id = $1", wallet_id)
-    return {"wallet": {
-        "id": str(row["id"]), "address": row["address"], "chain": row["chain"],
-        "label": row.get("label", ""), "is_whale": row.get("is_whale", False),
-        "is_mine": row.get("is_mine", False),
-        "created_at": row["created_at"].isoformat() if isinstance(row.get("created_at"), datetime) else str(row.get("created_at","")),
-    }}
+        row = await conn.fetchrow("SELECT * FROM wallets WHERE id = $1 AND user_id = $2", wallet_id, uid)
+    return {"wallet": _wallet_to_dict(row)}
 
 
 @app.delete("/api/wallets/{wallet_id}")
@@ -514,6 +688,35 @@ async def delete_wallet(wallet_id: str, user: dict = Depends(get_current_user)):
     if result == "DELETE 0":
         raise HTTPException(status_code=404, detail="Wallet not found")
     return {"deleted": True}
+
+
+@app.post("/api/wallets/{wallet_id}/refresh")
+async def refresh_wallet_balance(wallet_id: str, user: dict = Depends(get_current_user)):
+    """Manually refresh a wallet's on-chain balance."""
+    uid = user.get("id", "")
+    async with _get_db_conn() as conn:
+        w = await conn.fetchrow("SELECT * FROM wallets WHERE id = $1 AND user_id = $2", wallet_id, uid)
+    if not w:
+        raise HTTPException(status_code=404, detail="Wallet not found")
+
+    bal = await _fetch_wallet_balance(w["address"], w["chain"])
+    now = datetime.utcnow()
+
+    if db_pool is not None:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE wallets SET balance_usd = $1, balance_native = $2, last_balance_update = $3 WHERE id = $4",
+                bal["balance_usd"], bal["balance_native"], now, wallet_id
+            )
+    else:
+        for fw in _wallets:
+            if str(fw["id"]) == str(wallet_id):
+                fw["balance_usd"] = bal["balance_usd"]
+                fw["balance_native"] = bal["balance_native"]
+                fw["last_balance_update"] = now
+
+    w2 = _wallet_to_dict({**dict(w), "balance_usd": bal["balance_usd"], "balance_native": bal["balance_native"], "last_balance_update": now})
+    return {"wallet": w2}
 
 
 # ─── Whale Suggestions ──────────────────────────────────────────────
@@ -578,7 +781,7 @@ async def update_alert(alert_id: str, req: AlertUpdateRequest, user: dict = Depe
             set_clause = ", ".join(f"{k} = ${i+3}" for i, k in enumerate(updates))
             await conn.execute(f"UPDATE alerts SET {set_clause} WHERE id = $1 AND user_id = $2",
                                alert_id, uid, *updates.values())
-        row = await conn.fetchrow("SELECT * FROM alerts WHERE id = $1", alert_id)
+        row = await conn.fetchrow("SELECT * FROM alerts WHERE id = $1 AND user_id = $2", alert_id, uid)
     return {"alert": {
         "id": str(row["id"]), "rule_type": row.get("rule_type", ""),
         "threshold": float(row.get("threshold") or 0), "enabled": row.get("enabled", True),
