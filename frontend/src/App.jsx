@@ -26,7 +26,7 @@ function App() {
   useEffect(() => {
     if (token) {
       // Verify token is still valid
-      fetch(`${API_BASE}/api/auth/me`, {
+      fetch(`${API_BASE}/auth/me`, {
         headers: { Authorization: `Bearer ${token}` }
       })
         .then(res => {

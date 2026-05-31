@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 
 import { API_BASE } from '../config';
 
@@ -7,9 +7,17 @@ function Login({ onLogin }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [step, setStep] = useState('input'); // input, signing, verifying
+  // Guard against double-submission / race condition
+  const abortRef = useRef(null);
 
   const handleConnect = async (e) => {
     e.preventDefault();
+
+    // Cancel any in-flight request
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     if (!walletAddress || walletAddress.length < 10) {
       setError('Please enter a valid wallet address');
       return;
@@ -20,22 +28,29 @@ function Login({ onLogin }) {
     setStep('signing');
 
     try {
-      // Step 1: Get challenge message
-      const challenge = await fetch(
-        `${API_BASE}/api/auth/challenge?wallet_address=${encodeURIComponent(walletAddress)}`
-      ).then(r => r.json());
+      // Step 1: Get challenge
+      const challengeRes = await fetch(
+        `${API_BASE}/auth/challenge?wallet_address=${encodeURIComponent(walletAddress)}`,
+        { signal: controller.signal }
+      );
+      if (!challengeRes.ok) {
+        const errBody = await challengeRes.json().catch(() => ({}));
+        throw new Error(errBody.detail || `Challenge request failed (${challengeRes.status})`);
+      }
+      const challenge = await challengeRes.json();
 
       // Step 2: In a real app, the user would sign this with their wallet
       // For demo purposes, we simulate the signature
       // In production, use ethers.js or @solana/web32 to sign
-      
+
       // Simulate wallet signing delay
       await new Promise(resolve => setTimeout(resolve, 1500));
 
       setStep('verifying');
 
       // Step 3: Verify signature and get JWT
-      const auth = await fetch(`${API_BASE}/api/auth/verify`, {
+      // NOTE: API_BASE already includes /api prefix, so we use /auth/verify NOT /api/auth/verify
+      const authRes = await fetch(`${API_BASE}/auth/verify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -43,15 +58,18 @@ function Login({ onLogin }) {
           signature: '0x' + 'a'.repeat(130), // Simulated signature
           message: challenge.message,
         }),
+        signal: controller.signal,
       });
 
-      if (!auth.ok) {
-        throw new Error('Authentication failed');
+      if (!authRes.ok) {
+        const errBody = await authRes.json().catch(() => ({}));
+        throw new Error(errBody.detail || `Authentication failed (${authRes.status})`);
       }
 
-      const data = await auth.json();
+      const data = await authRes.json();
       onLogin(data.token, data.user);
     } catch (e) {
+      if (e.name === 'AbortError') return; // Silently ignore aborted requests
       setError(e.message || 'Authentication failed. Please try again.');
       setStep('input');
     } finally {
