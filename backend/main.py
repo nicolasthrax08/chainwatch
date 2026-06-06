@@ -817,6 +817,10 @@ async def get_dashboard(user: dict = Depends(get_current_user)):
                 "action": s["action"],
                 "amount_usd": float(s["amount_usd"] or 0),
                 "confidence_score": float(s["confidence_score"] or 0),
+                "confidence_final": round(
+                    0.5 * float(s["confidence_score"] or 0)
+                    + 0.5 * float(s["score_at_generation"] or 0), 2
+                ),
                 "status": s["status"],
                 "wallet_label": s["wallet_label"],
                 "wallet_address": s["wallet_address"],

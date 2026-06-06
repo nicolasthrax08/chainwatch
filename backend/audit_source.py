@@ -752,6 +752,12 @@ def check_parameter_renumbering(py_files: List[str], result: AuditResult):
     Pitfall #31: $N parameter renumbering when adding filters to existing
     parameterized queries. Detects hardcoded $N params in SQL strings that
     are built dynamically (f-strings or .format), which can cause index collisions.
+
+    Fixed: Suppresses false positives from Python f-strings that generate $N
+    dynamically (e.g., f"... = ${i+3}" which produces $3, $4, ... at runtime).
+    Also suppresses the safe pattern: f"... $1 ... $2 ..." used with
+    *values expansion where the SET clauses are generated from enumerate
+    with matching offset (e.g., f"{k} = ${i+3}").
     """
     for fpath in py_files:
         text = read_file(fpath)
@@ -760,8 +766,6 @@ def check_parameter_renumbering(py_files: List[str], result: AuditResult):
 
         file_lines = lines(text)
 
-        # Find SQL strings with $N params that are dynamically built
-        # Pattern: f"... WHERE ... $N ..." or "... WHERE ... $N ...".format(...)
         for i, line in enumerate(file_lines, 1):
             stripped = line.strip()
             if stripped.startswith("#"):
@@ -770,6 +774,27 @@ def check_parameter_renumbering(py_files: List[str], result: AuditResult):
             if re.search(r"\$\d+", stripped) and ('f"' in stripped or "f'" in stripped or ".format(" in stripped):
                 # Check if it's a SQL line (has SELECT, INSERT, UPDATE, WHERE, etc.)
                 if re.search(r"\b(?:SELECT|INSERT|UPDATE|DELETE|WHERE)\b", stripped, re.IGNORECASE):
+                    # Suppress false positive: Python f-string that generates $N dynamically
+                    # Pattern: ${i+N}, ${param_idx}, ${idx+1} etc. — computed at runtime
+                    if re.search(r"\$\{\w+\s*[+-]\s*\d+\}", stripped):
+                        continue
+                    # Suppress: f-string with param_idx/counter variable (dynamic)
+                    if re.search(r"\$\{(?:param_idx|idx|i|counter)\}", stripped):
+                        continue
+                    # Suppress safe pattern: $1/$2 in an UPDATE f-string that also contains
+                    # *values expansion — the SET clauses are generated from enumerate with
+                    # matching offset, so adding a filter maintains consistency.
+                    # Pattern: f"... SET {set_clauses} WHERE ... $1 ... $2 ..." with *values
+                    if re.search(r"\$1\b", stripped) and re.search(r"\$2\b", stripped):
+                        # Check if *values appears on the same line or next line
+                        next_line = file_lines[i] if i < len(file_lines) else ""
+                        if re.search(r"\*values\b", stripped) or re.search(r"\*values\b", next_line):
+                            continue
+                        # Also check if the preceding lines show the enumerate pattern
+                        context_start = max(0, i - 10)
+                        context = "\n".join(file_lines[context_start:i])
+                        if re.search(r"enumerate.*\$\{\w+\s*\+\s*\d+\}", context):
+                            continue
                     result.add(Finding(
                         pitfall="#31",
                         severity="minor",
