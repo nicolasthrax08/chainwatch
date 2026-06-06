@@ -1955,7 +1955,7 @@ async def health_check():
                     "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public'"
                 )
         except Exception as e:
-            report["subsystems"]["db"] = {"ok": False, "error": str(e)}
+            db_ok = False
     db_latency_ms = round((_time.monotonic() - t0) * 1000, 1)
     report["subsystems"]["db"] = {
         "ok": db_ok,
@@ -1976,7 +1976,7 @@ async def health_check():
     # ── Price cache freshness ──
     try:
         from services.monitor import _price_cache
-        cache_age = _time.monotonic() - _price_cache.get("timestamp", 0)
+        cache_age = _time.time() - _price_cache.get("timestamp", 0)
         report["subsystems"]["price_cache"] = {
             "fresh": cache_age < 120,
             "age_seconds": round(cache_age, 1),
@@ -1989,7 +1989,7 @@ async def health_check():
 
     # ── Dashboard price cache (CoinGecko cross-rates) ──
     try:
-        cache_age = _time.monotonic() - _dashboard_price_cache.get("timestamp", 0)
+        cache_age = _time.time() - _dashboard_price_cache.get("timestamp", 0)
         report["subsystems"]["dashboard_prices"] = {
             "fresh": cache_age < 300,
             "age_seconds": round(cache_age, 1),
