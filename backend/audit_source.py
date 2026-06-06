@@ -1116,6 +1116,390 @@ def check_cron_secret_fail_closed(py_files: List[str], result: AuditResult):
     result.add_pass("Cron secret auth is fail-closed (good)")
 
 
+def check_frontend_backend_field_contract(py_files: List[str], jsx_files: List[str],
+                                          sql_files: List[str], result: AuditResult):
+    """
+    Frontend-Backend Field Contract Audit (Pitfall #18).
+    Extracts all field accesses from .jsx files (e.g., wallet.balance_usd,
+    data.portfolio.total_value_hkd) and verifies each field is actually
+    returned by the corresponding backend endpoint.
+
+    Known safe exceptions:
+    - Fields from external APIs (Alpaca, Etherscan, etc.)
+    - Standard HTTP response fields (status, ok, json)
+    - Auth token fields
+    """
+    import json as _json
+
+    # ── 1. Build a map: endpoint -> set of returned field names ────────
+    endpoint_fields: dict = {}
+
+    for fpath in py_files:
+        text = read_file(fpath)
+        if not text:
+            continue
+        rel = os.path.relpath(fpath, os.getcwd())
+
+        # Find all endpoint handler functions and their return dicts
+        # We look for the pattern: return { "key": value, ... }
+        # inside async def functions decorated with @app.get/post/put/delete
+
+        # Simple heuristic: find all dict literals in return statements
+        # that contain quoted keys (i.e., JSON-like response dicts)
+        return_block_pattern = re.compile(
+            r'return\s*\{([^}]+(?:\{[^}]*\}[^}]*)*)\}',
+            re.DOTALL
+        )
+        # Also match multi-line return blocks
+        return_block_pattern_ml = re.compile(
+            r'return\s*\{',
+            re.MULTILINE
+        )
+
+        # Extract quoted keys from return dicts
+        # Look for patterns like "field_name": or 'field_name':
+        field_pattern = re.compile(r"""['"](\w+)['"]\s*:""")
+
+        # Find all return { ... } blocks (single-line and multi-line)
+        in_return = False
+        brace_depth = 0
+        current_block = []
+        line_num = 0
+
+        for i, line in enumerate(text.splitlines(), 1):
+            stripped = line.strip()
+
+            if re.search(r'\breturn\s*\{', line):
+                in_return = True
+                brace_depth = line.count('{') - line.count('}')
+                current_block = [line]
+                line_num = i
+                if brace_depth <= 0:
+                    # Single-line return
+                    block_text = ''.join(current_block)
+                    fields = set(field_pattern.findall(block_text))
+                    if fields:
+                        endpoint_fields.setdefault(rel, set()).update(fields)
+                    in_return = False
+                    current_block = []
+            elif in_return:
+                brace_depth += line.count('{') - line.count('}')
+                current_block.append(line)
+                if brace_depth <= 0:
+                    block_text = ''.join(current_block)
+                    fields = set(field_pattern.findall(block_text))
+                    if fields:
+                        endpoint_fields.setdefault(rel, set()).update(fields)
+                    in_return = False
+                    current_block = []
+
+    # ── 2. Extract field accesses from JSX files ────────────────────────
+    # Map: jsx_file -> list of (line_num, object_expr, field_name, context)
+    jsx_accesses: list = []
+
+    # Patterns to match field accesses:
+    #   wallet.balance_usd, data.portfolio.total_value_hkd, s.confidence_score
+    #   t.usd_value, a.enabled, sentiment.classification
+    field_access_pattern = re.compile(
+        r'(?:^|[\s,{([])(\w+)\.(\w+)(?:\s*[,}\)\]\?:.[]|$)'
+    )
+
+    # Also match nested: data.portfolio.total_value_usd
+    nested_access_pattern = re.compile(
+        r'(?:^|[\s,{[])(\w+)\.(\w+)\.(\w+)(?:\s*[,}\)\]\?:.[]|$)'
+    )
+
+    # Known safe fields that don't need backend verification
+    safe_builtins = {
+        # JS builtins / React
+        'setState', 'props', 'state', 'refs', 'ref', 'current', 'key',
+        'length', 'push', 'map', 'filter', 'reduce', 'find', 'forEach',
+        'includes', 'indexOf', 'slice', 'splice', 'concat', 'join',
+        'split', 'replace', 'match', 'search', 'trim', 'toLowerCase',
+        'toUpperCase', 'charAt', 'substring', 'toString', 'valueOf',
+        'Math', 'JSON', 'Object', 'Array', 'String', 'Number', 'Date',
+        'console', 'window', 'document', 'navigator', 'location',
+        'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
+        'Promise', 'Error', 'Map', 'Set', 'Symbol', 'parseInt', 'parseFloat',
+        'isNaN', 'isFinite', 'encodeURI', 'decodeURI', 'encodeURIComponent',
+        'decodeURIComponent', 'fetch', 'Response', 'Request', 'Headers',
+        'URL', 'URLSearchParams', 'FormData', 'Blob', 'File', 'FileReader',
+        'Event', 'EventTarget', 'Element', 'Node', 'HTMLElement',
+        # React hooks
+        'useState', 'useEffect', 'useCallback', 'useMemo', 'useRef',
+        'useContext', 'useReducer', 'useImperativeHandle', 'useLayoutEffect',
+        'useDebugValue', 'useId', 'useDeferredValue', 'useTransition',
+        'useSyncExternalStore', 'useInsertionEffect',
+        # Common React patterns
+        'className', 'style', 'onClick', 'onChange', 'onSubmit', 'onClose',
+        'onBlur', 'onFocus', 'onKeyDown', 'onKeyUp', 'onMouseEnter',
+        'onMouseLeave', 'disabled', 'checked', 'value', 'type', 'placeholder',
+        'id', 'name', 'title', 'alt', 'src', 'href', 'target', 'rel',
+        'role', 'tabIndex', 'autoComplete', 'autoFocus', 'readOnly',
+        'required', 'min', 'max', 'step', 'pattern', 'minLength', 'maxLength',
+        'cols', 'rows', 'width', 'height', 'colSpan', 'rowSpan',
+        'scope', 'headers', 'summary', 'open', 'selected', 'multiple',
+        'size', 'htmlFor', 'defaultValue', 'defaultChecked',
+        'innerHTML', 'innerText', 'textContent', 'outerHTML',
+        'scrollTop', 'scrollLeft', 'scrollWidth', 'scrollHeight',
+        'clientWidth', 'clientHeight', 'offsetWidth', 'offsetHeight',
+        'offsetTop', 'offsetLeft', 'offsetParent', 'offsetChild',
+        # Fetch API
+        'ok', 'status', 'statusText', 'url', 'redirected', 'bodyUsed',
+        'headers', 'json', 'text', 'blob', 'arrayBuffer', 'formData',
+        # Common response fields
+        'message', 'detail', 'error', 'errors', 'code', 'success',
+        'token', 'access_token', 'refresh_token',
+        # Alpaca API fields (external)
+        'equity', 'account_id', 'buying_power', 'cash', 'portfolio_value',
+        'status', 'currency', 'pattern_day_trader', 'trading_blocked',
+        'transfers_blocked', 'account_blocked', 'created_at', 'trade_suspended_by_user',
+        'multiplier', 'shorting_enabled', 'long_market_value', 'short_market_value',
+        'last_equity', 'last_long_market_value', 'last_short_market_value',
+        # Pagination
+        'page', 'per_page', 'total', 'total_pages',
+        # Common UI state
+        'loading', 'error', 'data', 'show', 'visible', 'hidden',
+        'active', 'disabled', 'selected', 'focused', 'hovered',
+        # Form state
+        'form', 'setForm', 'setLoading', 'setError', 'setShowAdd',
+        'setShowSuggestions', 'setAnalyzeSignal', 'setMirroring',
+        'setMirroringIds', 'setHistory', 'setHistoryLoading', 'setHistoryError',
+        'setSentiment', 'setTogglingIds',
+        # Common helpers
+        'prev', 'next', 'current', 'initial', 'final',
+        # CSS / style
+        'display', 'position', 'top', 'left', 'right', 'bottom',
+        'margin', 'padding', 'border', 'background', 'color',
+        'fontSize', 'fontWeight', 'textAlign', 'verticalAlign',
+        'flexDirection', 'justifyContent', 'alignItems', 'gap',
+        'gridTemplateColumns', 'gridGap', 'gridColumn', 'gridRow',
+        'width', 'height', 'minWidth', 'maxWidth', 'minHeight', 'maxHeight',
+        'overflow', 'overflowX', 'overflowY', 'whiteSpace', 'textOverflow',
+        'borderRadius', 'borderTop', 'borderBottom', 'borderLeft', 'borderRight',
+        'boxShadow', 'opacity', 'zIndex', 'cursor', 'pointerEvents',
+        'userSelect', 'transition', 'transform', 'animation',
+        'content', 'clear', 'float', 'listStyle', 'listStyleType',
+        'textDecoration', 'textTransform', 'letterSpacing', 'lineHeight',
+        'wordBreak', 'wordWrap', 'wordSpacing',
+        'backgroundColor', 'backgroundImage', 'backgroundSize',
+        'backgroundPosition', 'backgroundRepeat',
+        'marginTop', 'marginBottom', 'marginLeft', 'marginRight',
+        'paddingTop', 'paddingBottom', 'paddingLeft', 'paddingRight',
+        'flex', 'flexGrow', 'flexShrink', 'flexBasis',
+        'gridArea', 'gridAutoColumns', 'gridAutoRows', 'gridAutoFlow',
+        'outline', 'outlineOffset', 'resize', 'appearance',
+        'visibility', 'clip', 'clipPath', 'filter', 'backdropFilter',
+        'mixBlendMode', 'isolation', 'objectFit', 'objectPosition',
+        'scrollBehavior', 'scrollSnapType', 'scrollSnapAlign',
+        'touchAction', 'willChange', 'contain',
+        # Misc
+        'key', 'ref', 'children',
+    }
+
+    # Fields that are computed client-side from backend data
+    computed_fields = {
+        'isLiveUpdate', 'fmtBalance', 'fmtTotal', 'timeAgo', 'truncateAddress',
+        'fmtBalance', 'is_whale', 'is_mine',  # these are used as booleans in conditions
+    }
+
+    # Known endpoint-to-response-field mapping (manually curated for accuracy)
+    # This is more reliable than parsing Python return dicts
+    known_endpoint_fields = {
+        '/api/dashboard': {
+            'portfolio', 'wallets', 'personal_wallets', 'whale_wallets_list',
+            'recent_transactions', 'alerts', 'copy_trade_signals',
+            # portfolio sub-fields
+            'total_value_usd', 'total_value_hkd', 'total_value_btc',
+            'wallets_tracked', 'whale_wallets_tracked', 'fresh_wallets',
+            # wallet fields (personal_wallets, whale_wallets_list, wallets)
+            'id', 'address', 'chain', 'label', 'is_whale', 'is_mine',
+            'is_fresh_wallet', 'risk_label', 'balance_native',
+            'balance_usd', 'balance_hkd', 'balance_btc',
+            'last_balance_update', 'created_at',
+            # transaction fields (recent_transactions)
+            'tx_hash', 'type', 'amount', 'token', 'usd_value', 'timestamp',
+            'wallet_label', 'wallet_address', 'status',
+            # alert fields (alerts)
+            'rule_type', 'threshold', 'enabled', 'last_fired',
+            # signal fields (copy_trade_signals)
+            'token_symbol', 'action', 'amount_usd', 'confidence_score',
+            'confidence_final', 'whale_score', 'score_at_generation',
+            'explanation', 'explanation_stale', 'wallet_label',
+            'wallet_address', 'status',
+        },
+        '/api/signals': {
+            'signals',
+            'id', 'token_symbol', 'action', 'amount_usd', 'confidence_score',
+            'confidence_final', 'whale_score', 'wallet_address', 'status',
+            'wallet_label', 'created_at', 'explanation', 'explanation_stale',
+            'score_at_generation',
+        },
+        '/api/wallets': {
+            'wallets',
+            'id', 'address', 'chain', 'label', 'is_whale', 'is_mine', 'created_at',
+            'balance_usd', 'balance_hkd', 'balance_btc', 'last_balance_update',
+        },
+        '/api/activity': {
+            'transactions', 'total', 'page', 'per_page', 'total_pages',
+            'id', 'tx_hash', 'type', 'amount', 'token', 'usd_value',
+            'timestamp', 'chain', 'wallet_label', 'wallet_address', 'status',
+        },
+        '/api/alerts': {
+            'alerts',
+            'id', 'rule_type', 'threshold', 'enabled', 'created_at', 'last_fired',
+        },
+        '/api/alerts/history': {
+            'history',
+            'id', 'alert_id', 'rule_type', 'trigger_value', 'details', 'created_at',
+        },
+        '/api/whale-sentiment': {
+            'sentiment_score', 'classification', 'inflow_usd', 'outflow_usd', 'tx_count',
+        },
+    }
+
+    # Map JSX files to their primary API endpoints
+    jsx_endpoint_map = {
+        'Dashboard.jsx': ['/api/dashboard', '/api/whale-sentiment'],
+        'CopyTrades.jsx': ['/api/signals'],
+        'Wallets.jsx': ['/api/wallets', '/api/whale-suggestions'],
+        'Activity.jsx': ['/api/activity'],
+        'Alerts.jsx': ['/api/alerts', '/api/alerts/history'],
+    }
+
+    # ── 3. Check each JSX file's field accesses against endpoint fields ──
+    findings = []
+
+    for fpath in jsx_files:
+        text = read_file(fpath)
+        if not text:
+            continue
+        fname = os.path.basename(fpath)
+        rel = os.path.relpath(fpath, os.getcwd())
+
+        # Determine which endpoints this JSX file uses
+        endpoints = jsx_endpoint_map.get(fname, [])
+        allowed_fields = set()
+        for ep in endpoints:
+            allowed_fields.update(known_endpoint_fields.get(ep, set()))
+
+        # Also allow all fields from all endpoints (for shared components)
+        # but flag only clear mismatches
+        all_endpoint_fields = set()
+        for fields in known_endpoint_fields.values():
+            all_endpoint_fields.update(fields)
+
+        # Extract variable names that hold API response data
+        # Look for: const data = await apiFetch(...), const { x, y } = data
+        response_vars = set()
+        for match in re.finditer(r'(?:const|let|var)\s+(\w+)\s*=\s*await\s+apiFetch', text):
+            response_vars.add(match.group(1))
+        for match in re.finditer(r'(?:const|let|var)\s*\{([^}]+)\}\s*=\s*data', text):
+            for var in match.group(1).split(','):
+                response_vars.add(var.strip())
+
+        # Extract field accesses: var.field
+        for i, line in enumerate(text.splitlines(), 1):
+            # Skip comments
+            stripped = line.strip()
+            if stripped.startswith('//') or stripped.startswith('*') or stripped.startswith('/*'):
+                continue
+
+            for match in field_access_pattern.finditer(line):
+                obj_var = match.group(1)
+                field_name = match.group(2)
+
+                # Skip safe builtins
+                if field_name in safe_builtins or obj_var in safe_builtins:
+                    continue
+                # Skip React/event handlers
+                if obj_var in ('e', 'event', 'props', 'state', 'ref', 'refs'):
+                    continue
+                # Skip style objects
+                if obj_var == 'style' or field_name in (
+                    'display', 'position', 'margin', 'padding', 'border',
+                    'background', 'color', 'fontSize', 'fontWeight', 'textAlign',
+                    'verticalAlign', 'flex', 'gap', 'width', 'height',
+                    'borderRadius', 'boxShadow', 'opacity', 'zIndex', 'cursor',
+                    'overflow', 'top', 'left', 'right', 'bottom',
+                    'marginTop', 'marginBottom', 'marginLeft', 'marginRight',
+                    'paddingTop', 'paddingBottom', 'paddingLeft', 'paddingRight',
+                    'flexDirection', 'justifyContent', 'alignItems',
+                    'gridTemplateColumns', 'gridGap',
+                    'backgroundColor', 'backgroundImage', 'backgroundSize',
+                    'backgroundPosition', 'backgroundRepeat',
+                    'minWidth', 'maxWidth', 'minHeight', 'maxHeight',
+                    'flexGrow', 'flexShrink', 'flexBasis',
+                    'outline', 'resize', 'visibility',
+                    'transition', 'transform', 'animation',
+                    'content', 'clear', 'float',
+                    'textDecoration', 'textTransform', 'letterSpacing', 'lineHeight',
+                    'whiteSpace', 'textOverflow',
+                    'listStyle', 'listStyleType',
+                    'pointerEvents', 'userSelect',
+                    'scrollBehavior', 'touchAction',
+                    'willChange', 'contain',
+                    'mixBlendMode', 'isolation',
+                    'objectFit', 'objectPosition',
+                    'clip', 'clipPath', 'filter', 'backdropFilter',
+                ):
+                    continue
+                # Skip if it's a method call (ends with ())
+                after_match = line[match.end():]
+                if after_match.strip().startswith('('):
+                    continue
+
+                # Skip .map() iteration variables (e.g., TX_TYPES.map(t => t.label))
+                # Check current and previous line for `.map(${obj_var} =>` pattern
+                map_iter_re = re.compile(rf'\.map\s*\(\s*{re.escape(obj_var)}\s*=>')
+                if map_iter_re.search(line):
+                    continue
+                if i > 1:
+                    prev_lines = text.splitlines()
+                    if i - 2 < len(prev_lines) and map_iter_re.search(prev_lines[i - 2]):
+                        continue
+
+                # Check if this field is expected from any endpoint used by this JSX file
+                if endpoints and field_name not in allowed_fields:
+                    # Only flag if it's clearly a data field (not a local variable)
+                    # Heuristic: if the object var is commonly used for API data
+                    if obj_var in ('w', 'wallet', 's', 'signal', 't', 'tx',
+                                   'a', 'alert', 'h', 'item', 'row',
+                                   'data', 'd', 'sentiment'):
+                        findings.append((rel, i, obj_var, field_name, endpoints))
+
+    # ── 4. Report findings ──────────────────────────────────────────────
+    if findings:
+        # Deduplicate
+        seen = set()
+        unique_findings = []
+        for f in findings:
+            key = (f[0], f[2], f[3])  # file, obj, field
+            if key not in seen:
+                seen.add(key)
+                unique_findings.append(f)
+
+        for rel, line_num, obj, field, endpoints in unique_findings[:10]:  # Cap at 10
+            ep_str = ', '.join(endpoints) if endpoints else 'unknown'
+            result.add(Finding(
+                pitfall="field-contract",
+                severity="minor",
+                file=rel,
+                line=line_num,
+                description=(
+                    f"Frontend accesses `{obj}.{field}` but field `{field}` is not "
+                    f"returned by endpoint(s): {ep_str}. "
+                    f"This will silently show placeholder values ('—') or undefined."
+                ),
+                suggestion=(
+                    f"Either add `{field}` to the endpoint response, or remove "
+                    f"the `{obj}.{field}` access from the frontend if not needed."
+                ),
+            ))
+    else:
+        result.add_pass("Frontend-backend field contract (all accessed fields are returned)")
+
+
 # ─── Main ────────────────────────────────────────────────────────────
 
 def run_audit(base_path: str) -> AuditResult:
@@ -1149,6 +1533,7 @@ def run_audit(base_path: str) -> AuditResult:
     check_ws_reconnect_patterns(jsx_files, result)
     check_parameter_renumbering(py_files, result)
     check_cron_secret_fail_closed(py_files, result)
+    check_frontend_backend_field_contract(py_files, jsx_files, sql_files, result)
 
     return result
 

@@ -1,17 +1,17 @@
 [
   {
-    "task_type": "refine_prompt",
-    "payload": "The audit tool now has good signal-to-noise ratio. Next improvement: add automated column-reference extraction from Python SQL strings that checks ALL SET/SELECT/WHERE column references against the migration schema (not just INSERT columns). This would catch Pitfall #20 more reliably.",
-    "status": "pending"
-  },
-  {
     "task_type": "write_tool",
-    "payload": "Add a pre-deploy hook that runs audit_source.py and prevents deployment if critical findings exist. Integrate with the .deploy_trigger mechanism.",
+    "payload": "Fix verify_deploy.py: move 'import httpx' from inside try/except to module level (Pitfall #6). Currently at line 34, the import is inside a try block without a module-level fallback.",
     "status": "pending"
   },
   {
     "task_type": "analyze_failures",
-    "payload": "Investigate the remaining infrastructure issues from previous cycle: (1) PostgreSQL connection failing in production (in-memory fallback), (2) Stale deployed code (whale-suggestions auth bypass). These cannot be fixed from the sandbox — they require Zeabur redeployment.",
+    "payload": "Investigate the remaining infrastructure issues: (1) PostgreSQL connection failing in production (in-memory fallback), (2) Stale deployed code. These require Zeabur redeployment and cannot be fixed from the sandbox.",
+    "status": "pending"
+  },
+  {
+    "task_type": "audit_outputs",
+    "payload": "Run a full frontend-backend field contract audit: extract all field accesses from .jsx files and verify each field is returned by the corresponding API endpoint. Focus on Dashboard.jsx, CopyTrades.jsx, Wallets.jsx, and Activity.jsx.",
     "status": "pending"
   }
 ]
