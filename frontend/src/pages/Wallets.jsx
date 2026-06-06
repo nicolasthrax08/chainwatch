@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 
 import { API_BASE } from '../config';
+import { ChainBadge } from '../App';
 
 async function apiFetch(path, token, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -20,7 +21,20 @@ function truncateAddress(addr) {
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 }
 
-function Wallets({ token }) {
+function fmtBalance(wallet, currency) {
+  let value;
+  if (currency === 'HKD') value = wallet.balance_hkd;
+  else if (currency === 'BTC') value = wallet.balance_btc;
+  else value = wallet.balance_usd;
+
+  if (value == null || value == undefined) return '—';
+
+  if (currency === 'BTC') return `₿${value.toFixed(8)}`;
+  if (currency === 'HKD') return `HK$${value.toLocaleString()}`;
+  return `$${value.toLocaleString()}`;
+}
+
+function Wallets({ token, currency }) {
   const [wallets, setWallets] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -123,8 +137,7 @@ function Wallets({ token }) {
           {['eth', 'sol', 'btc'].map(chain => (
             <div key={chain} style={{ marginBottom: '16px' }}>
               <h3 style={{ color: chainColors[chain], marginBottom: '8px', fontSize: '0.9rem' }}>
-                <span className={`chain-dot ${chain}`} />
-                {chain.toUpperCase()}
+                <ChainBadge chain={chain} showLabel={true} />
               </h3>
               {suggestions
                 .filter(s => s.chain === chain)
@@ -159,9 +172,13 @@ function Wallets({ token }) {
                 type="text"
                 value={form.address}
                 onChange={e => setForm({ ...form, address: e.target.value })}
-                placeholder="0x... or base58..."
+                placeholder="0x... or base58... or bc1..."
                 style={{ width: '100%' }}
                 required
+                minLength={10}
+                maxLength={255}
+                pattern="^(0x[A-Fa-f0-9]{40}|[1-9A-HJ-NP-Za-km-z]{32,44}|(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,62})$"
+                title="Enter a valid ETH (0x...), Solana (base58), or BTC (bc1/1/3) address"
               />
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
@@ -174,9 +191,9 @@ function Wallets({ token }) {
                   onChange={e => setForm({ ...form, chain: e.target.value })}
                   style={{ width: '100%' }}
                 >
-                  <option value="eth">🟣 Ethereum (ETH)</option>
-                  <option value="sol">🟦 Solana (SOL)</option>
-                  <option value="btc">🟡 Bitcoin (BTC)</option>
+                  <option value="eth">◆ Ethereum (ETH)</option>
+                  <option value="sol">● Solana (SOL)</option>
+                  <option value="btc">₿ Bitcoin (BTC)</option>
                 </select>
               </div>
               <div>
@@ -235,7 +252,7 @@ function Wallets({ token }) {
                   <th>Chain</th>
                   <th>Label</th>
                   <th>Address</th>
-                  <th>Balance (USD)</th>
+                  <th>Balance ({currency})</th>
                   <th>Type</th>
                   <th>Added</th>
                   <th>Actions</th>
@@ -244,13 +261,10 @@ function Wallets({ token }) {
               <tbody>
                   {wallets.map(w => (
                     <tr key={w.id}>
-                      <td>
-                        <span className={`chain-dot ${w.chain}`} />
-                        {w.chain.toUpperCase()}
-                      </td>
+                      <td><ChainBadge chain={w.chain} showLabel={false} /></td>
                       <td>{w.label || '—'}</td>
                       <td className="address">{truncateAddress(w.address)}</td>
-                      <td>${w.balance_usd > 0 ? w.balance_usd.toLocaleString() : '—'}</td>
+                      <td>{fmtBalance(w, currency)}</td>
                       <td>
                         {w.is_whale && <span className="tx-badge receive" style={{ marginRight: '4px' }}>Whale</span>}
                         {w.is_mine && <span className="tx-badge swap">Mine</span>}

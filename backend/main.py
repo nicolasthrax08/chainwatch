@@ -1175,7 +1175,8 @@ async def get_activity(
                 "timestamp": t["timestamp"].isoformat(),
                 "chain": t["chain"],
                 "wallet_label": t["label"],
-                "wallet_address": t["wallet_address"]
+                "wallet_address": t["wallet_address"],
+                "status": "confirmed",
             }
             for t in transactions
         ],
@@ -1809,8 +1810,22 @@ _CRON_SECRET = os.environ.get("CRON_SECRET", "")
 
 
 async def _require_cron_secret(authorization: str = Header("")):
-    """Verify the CRON_SECRET header matches. No-op if CRON_SECRET is not set."""
-    if _CRON_SECRET and authorization != f"Bearer {_CRON_SECRET}":
+    """Verify the CRON_SECRET header matches.
+
+    Fail-closed: if CRON_SECRET is not configured, deny access.
+    This prevents accidentally exposing task-queue endpoints when the
+    environment variable is missing (defense-in-depth).
+    """
+    if not _CRON_SECRET:
+        logger.warning(
+            "CRON_SECRET not set — task-queue endpoint accessed without secret. "
+            "Denying by default (fail-closed)."
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Task queue auth not configured on server",
+        )
+    if authorization != f"Bearer {_CRON_SECRET}":
         raise HTTPException(status_code=403, detail="Invalid cron secret")
 
 

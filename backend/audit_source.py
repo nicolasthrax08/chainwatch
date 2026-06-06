@@ -617,6 +617,177 @@ def check_dual_backend_drift(py_base: str, result: AuditResult):
         result.add_pass("Pitfall #17: No overlapping service files between root and backend")
 
 
+def check_unbounded_state_dicts(py_files: List[str], result: AuditResult):
+    """
+    Pitfall #12: Unbounded state dicts in background workers / services.
+    Finds module-level dicts that are written to (via .update, [], etc.) but
+    never pruned — they grow without bound, causing memory leaks.
+    """
+    # Known pruner function names that indicate the dict IS managed
+    pruner_patterns = re.compile(
+        r"def\s+_(?:prune|cleanup|evict|expire).*cache|cooldown|dedup|state",
+        re.IGNORECASE,
+    )
+
+    for fpath in py_files:
+        text = read_file(fpath)
+        file_lines = lines(text)
+
+        # Quick skip: if file has a pruner, it's likely managed
+        has_pruner = pruner_patterns.search(text)
+
+        # Find module-level dict assignments: _something: dict = {} or _something = {}
+        dict_inits = []
+        for i, line in enumerate(file_lines):
+            stripped = line.lstrip()
+            # Only top-level (no indentation) assignments
+            if stripped and not line[0].isspace():
+                m = re.match(r"(_[a-zA-Z_]\w*)\s*(?::\s*(?:dict|Dict[^a-z]*))?\s*=\s*\{\s*\}", stripped)
+                if m:
+                    dict_inits.append((i + 1, m.group(1)))
+
+        if not dict_inits:
+            continue
+
+        for line_num, var_name in dict_inits:
+            # Check if this dict is written to anywhere
+            write_pattern = re.compile(rf"\b{re.escape(var_name)}\b\s*(?:\[|\.update|\.setdefault|\.pop)\s*\(")
+            is_written = write_pattern.search(text)
+            if not is_written:
+                continue  # Read-only dicts are fine
+
+            # Check if there's a pruning mechanism
+            if has_pruner:
+                # Verify the pruner actually references this dict
+                pruner_refs = re.compile(rf"def\s+_(?:prune|cleanup|evict|expire).*\b{re.escape(var_name)}\b")
+                if pruner_refs.search(text):
+                    continue  # Dict has a dedicated pruner — OK
+                # Fall through: pruner exists but doesn't reference this dict
+
+            result.add(Finding(
+                pitfall="#12",
+                severity="minor",
+                file=fpath,
+                line=line_num,
+                description=(
+                    f"Module-level dict '{var_name}' is written to but has no pruning mechanism. "
+                    f"This can cause unbounded memory growth (Pitfall #12: unbounded state dicts)."
+                ),
+                suggestion=(
+                    f"Add a _prune_{var_name}() function that removes expired entries, "
+                    f"and call it periodically (e.g., on read or on a timer)."
+                ),
+            ))
+
+    result.add_pass("Pitfall #12: Unbounded state dict check completed")
+
+
+def check_ws_reconnect_patterns(jsx_files: List[str], result: AuditResult):
+    """
+    Pitfall #29/#30: WebSocket zombie reconnect and stale token in closure.
+    Checks for:
+    - onclose handler that schedules reconnect without nulling onclose first
+    - reconnect using closure-captured token instead of ref
+    """
+    for fpath in jsx_files:
+        text = read_file(fpath)
+        if "onclose" not in text.lower() and "reconnect" not in text.lower():
+            continue
+
+        file_lines = lines(text)
+
+        # Check for onclose handler with reconnect but no null-onclose-before-close
+        has_onclose_handler = bool(re.search(r"\.onclose\s*=\s*(?:function|\(|\w+\s*=>)", text, re.IGNORECASE))
+        has_reconnect_in_onclose = bool(re.search(r"onclose[\s\S]{0,200}(?:reconnect|connectWS|setTimeout.*connect)", text, re.IGNORECASE))
+        has_null_onclose = bool(re.search(r"onclose\s*=\s*null", text))
+
+        if has_onclose_handler and has_reconnect_in_onclose and not has_null_onclose:
+            # Find the line
+            for i, line in enumerate(file_lines, 1):
+                if "onclose" in line.lower() and "reconnect" in line.lower():
+                    result.add(Finding(
+                        pitfall="#29",
+                        severity="minor",
+                        file=fpath,
+                        line=i,
+                        description=(
+                            "WebSocket onclose handler contains reconnect logic but does not "
+                            "null out onclose before ws.close(). This causes zombie reconnect "
+                            "after intentional disconnect."
+                        ),
+                        suggestion=(
+                            "Before calling ws.close(), set ws.onclose = null to prevent "
+                            "the reconnect path from firing on intentional disconnect."
+                        ),
+                    ))
+                    break
+
+        # Check for stale token in reconnect closure
+        has_token_ref = bool(re.search(r"tokenRef|token_ref", text))
+        has_reconnect_with_token = bool(re.search(r"setTimeout\s*\(\s*\(\)\s*=>\s*\w+\(\s*token\s*\)", text))
+        if has_reconnect_with_token and not has_token_ref:
+            for i, line in enumerate(file_lines, 1):
+                if "setTimeout" in line and "token" in line:
+                    result.add(Finding(
+                        pitfall="#30",
+                        severity="minor",
+                        file=fpath,
+                        line=i,
+                        description=(
+                            "WebSocket reconnect uses closure-captured 'token' variable. "
+                            "If token is refreshed (re-auth), the reconnect uses the stale token."
+                        ),
+                        suggestion=(
+                            "Use a tokenRef (useRef) that is kept in sync via useEffect, "
+                            "and read tokenRef.current in the reconnect path."
+                        ),
+                    ))
+                    break
+
+    result.add_pass("Pitfall #29/#30: WS reconnect pattern check completed")
+
+
+def check_parameter_renumbering(py_files: List[str], result: AuditResult):
+    """
+    Pitfall #31: $N parameter renumbering when adding filters to existing
+    parameterized queries. Detects hardcoded $N params in SQL strings that
+    are built dynamically (f-strings or .format), which can cause index collisions.
+    """
+    for fpath in py_files:
+        text = read_file(fpath)
+        if "$" not in text:
+            continue
+
+        file_lines = lines(text)
+
+        # Find SQL strings with $N params that are dynamically built
+        # Pattern: f"... WHERE ... $N ..." or "... WHERE ... $N ...".format(...)
+        for i, line in enumerate(file_lines, 1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            # Look for $N in f-strings or .format() SQL
+            if re.search(r"\$\d+", stripped) and ('f"' in stripped or "f'" in stripped or ".format(" in stripped):
+                # Check if it's a SQL line (has SELECT, INSERT, UPDATE, WHERE, etc.)
+                if re.search(r"\b(?:SELECT|INSERT|UPDATE|DELETE|WHERE)\b", stripped, re.IGNORECASE):
+                    result.add(Finding(
+                        pitfall="#31",
+                        severity="minor",
+                        file=fpath,
+                        line=i,
+                        description=(
+                            f"Hardcoded $N positional parameter in dynamically-built SQL. "
+                            f"Adding a new filter can shift all subsequent $N references."
+                        ),
+                        suggestion=(
+                            "Use a param_idx counter that increments for each appended parameter, "
+                            "and reference params as ${param_idx} in f-string SQL."
+                        ),
+                    ))
+
+    result.add_pass("Pitfall #31: $N parameter renumbering check completed")
+
+
 def check_write_then_reuse_conn(py_files: List[str], result: AuditResult):
     """
     Pitfall #7b: Connection variable used after async with block exits.
@@ -882,6 +1053,44 @@ def check_missing_returning(py_files: List[str], result: AuditResult):
     result.add_pass("Pitfall #8: Write-then-re-read check completed")
 
 
+def check_cron_secret_fail_closed(py_files: List[str], result: AuditResult):
+    """
+    Cron secret auth must fail-closed: if CRON_SECRET is not set,
+    the endpoint must deny access (not silently allow it).
+    Pattern to flag: `if _CRON_SECRET and authorization != ...`
+    which silently passes when CRON_SECRET is empty string.
+    """
+    bad_pattern = re.compile(
+        r"if\s+_CRON_SECRET\s+and\s+authorization\s*!="
+    )
+    good_pattern = re.compile(
+        r"if\s+not\s+_CRON_SECRET"
+    )
+    for fpath in py_files:
+        text = read_file(fpath)
+        if "_CRON_SECRET" not in text:
+            continue
+        rel = os.path.relpath(fpath, os.getcwd())
+        if bad_pattern.search(text) and not good_pattern.search(text):
+            result.add(Finding(
+                pitfall="cron-secret",
+                severity="critical",
+                file=rel,
+                line=0,
+                description=(
+                    "CRON_SECRET auth uses `if _CRON_SECRET and auth != ...` which "
+                    "silently bypasses auth when CRON_SECRET is empty string (fail-open). "
+                    "Should fail-closed: check `if not _CRON_SECRET: raise 503` first."
+                ),
+                suggestion=(
+                    "Add explicit check: `if not _CRON_SECRET: raise 503` "
+                    "before the auth comparison."
+                ),
+            ))
+            return
+    result.add_pass("Cron secret auth is fail-closed (good)")
+
+
 # ─── Main ────────────────────────────────────────────────────────────
 
 def run_audit(base_path: str) -> AuditResult:
@@ -906,11 +1115,15 @@ def run_audit(base_path: str) -> AuditResult:
     check_ws_auth_before_accept(py_files, result)
     check_start_monitor_wired(py_files, result)
     check_dual_backend_drift(base_path, result)
+    check_unbounded_state_dicts(py_files, result)
     check_write_then_reuse_conn(py_files, result)
     check_placeholder_masking(py_files, jsx_files, result)
     check_cors_config(py_files, result)
     check_n_plus_one_patterns(py_files, result)
     check_missing_returning(py_files, result)
+    check_ws_reconnect_patterns(jsx_files, result)
+    check_parameter_renumbering(py_files, result)
+    check_cron_secret_fail_closed(py_files, result)
 
     return result
 

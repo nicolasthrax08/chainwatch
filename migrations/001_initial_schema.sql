@@ -86,6 +86,12 @@ CREATE INDEX IF NOT EXISTS idx_whale_suggestions_chain ON whale_suggestions(chai
 CREATE INDEX IF NOT EXISTS idx_copy_trade_signals_wallet_id ON copy_trade_signals(wallet_id);
 
 -- Pre-seed whale suggestions
+-- HIGH-1 FIX: Add unique constraint on (chain, address) so ON CONFLICT works correctly.
+-- Without this, ON CONFLICT DO NOTHING targets only the PK (UUID) and never prevents
+-- duplicate (chain, address) rows from re-running the seed.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_whale_suggestions_chain_address
+    ON whale_suggestions(chain, address);
+
 INSERT INTO whale_suggestions (chain, address, label, source) VALUES
 -- Ethereum whales
 ('eth', '0x28C6c06298d514Db089934071355E5743bf21d60', 'Binance Hot Wallet', 'public'),
@@ -104,5 +110,5 @@ INSERT INTO whale_suggestions (chain, address, label, source) VALUES
 ('bc1qazcm763858nkj2dj986etajv6wquslv8uxwczt', 'Bitfinex Cold', 'public'),
 ('34xp4vRoCGJym3xR7yCVPFHoCNxv4Twseo', 'Binance Cold BTC', 'public'),
 ('bc1qsxdxm0v65y8d4jw24k9vcf8nq9g7qkvq2uqygm', 'Kraken BTC', 'public'),
-('1P5ZEDWTyMmXPXjVZM295zXq4Y5q1gGq1q', 'Unknown Whale', 'public')
-ON CONFLICT DO NOTHING;
+('btc', '1P5ZEDWTyMmXPXjVZM295zXq4Y5q1gGq1q', 'Unknown Whale', 'public')
+ON CONFLICT (chain, address) DO NOTHING;

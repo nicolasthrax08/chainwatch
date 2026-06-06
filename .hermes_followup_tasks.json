@@ -1,0 +1,17 @@
+[
+  {
+    "task_type": "refine_prompt",
+    "payload": "The audit tool now has good signal-to-noise ratio. Next improvement: add automated column-reference extraction from Python SQL strings that checks ALL SET/SELECT/WHERE column references against the migration schema (not just INSERT columns). This would catch Pitfall #20 more reliably.",
+    "status": "pending"
+  },
+  {
+    "task_type": "write_tool",
+    "payload": "Add a pre-deploy hook that runs audit_source.py and prevents deployment if critical findings exist. Integrate with the .deploy_trigger mechanism.",
+    "status": "pending"
+  },
+  {
+    "task_type": "analyze_failures",
+    "payload": "Investigate the remaining infrastructure issues from previous cycle: (1) PostgreSQL connection failing in production (in-memory fallback), (2) Stale deployed code (whale-suggestions auth bypass). These cannot be fixed from the sandbox — they require Zeabur redeployment.",
+    "status": "pending"
+  }
+]

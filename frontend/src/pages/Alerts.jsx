@@ -15,6 +15,17 @@ async function apiFetch(path, token, options = {}) {
   return res.json();
 }
 
+function timeAgo(timestamp) {
+  if (!timestamp) return '—';
+  const diffMs = Date.now() - new Date(timestamp).getTime();
+  if (diffMs <= 0) return 'just now';
+  const seconds = Math.floor(diffMs / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
+}
+
 const PRESET_ALERTS = [
   { rule_type: 'large_transaction', label: 'Large Transaction', description: 'Any txn > $X', default_threshold: 10000 },
   { rule_type: 'whale_buy', label: 'Whale Token Buy', description: 'New token buy by whale wallets', default_threshold: 5000 },
@@ -22,7 +33,7 @@ const PRESET_ALERTS = [
   { rule_type: 'balance_drop', label: 'Balance Drop', description: 'Wallet balance drops > X%', default_threshold: 10 },
 ];
 
-function Alerts({ token }) {
+function Alerts({ token, currency }) {
   const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
@@ -31,6 +42,9 @@ function Alerts({ token }) {
     threshold: 0,
     enabled: true,
   });
+  const [history, setHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState(false);
 
   const load = async () => {
     try {
@@ -43,7 +57,39 @@ function Alerts({ token }) {
     }
   };
 
-  useEffect(() => { load(); }, [token]);
+  const loadHistory = async () => {
+    try {
+      const data = await apiFetch('/alerts/history', token);
+      setHistory(data.history || []);
+      setHistoryError(false);
+    } catch (e) {
+      setHistoryError(true);
+      setHistory([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const doLoad = async () => {
+      try {
+        const data = await apiFetch('/alerts', token);
+        if (!cancelled) setAlerts(data.alerts || []);
+      } catch (e) {
+        if (!cancelled) console.error(e);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    doLoad();
+    return () => { cancelled = true; };
+  }, [token]);
+
+  useEffect(() => {
+    setHistoryLoading(true);
+    loadHistory();
+  }, [token]);
 
   const handleAddPreset = (preset) => {
     setForm({
@@ -69,7 +115,11 @@ function Alerts({ token }) {
     }
   };
 
+  const [togglingIds, setTogglingIds] = useState(new Set());  // Finding: per-alert toggle loading state
+
   const handleToggle = async (alert) => {
+    if (togglingIds.has(alert.id)) return;  // Prevent double-click while in-flight
+    setTogglingIds(prev => new Set(prev).add(alert.id));
     try {
       await apiFetch(`/alerts/${alert.id}`, token, {
         method: 'PUT',
@@ -78,6 +128,8 @@ function Alerts({ token }) {
       load();
     } catch (e) {
       alert(e.message);
+    } finally {
+      setTogglingIds(prev => { const n = new Set(prev); n.delete(alert.id); return n; });
     }
   };
 
@@ -183,7 +235,7 @@ function Alerts({ token }) {
         </div>
       )}
 
-      {/* Alert list */}
+      {/* Configured alerts table */}
       <div className="card">
         <div className="card-title">Configured Alerts ({alerts.length})</div>
         {alerts.length === 0 ? (
@@ -197,6 +249,7 @@ function Alerts({ token }) {
                 <tr>
                   <th>Rule Type</th>
                   <th>Threshold</th>
+                  <th>Last Fired</th>
                   <th>Status</th>
                   <th>Created</th>
                   <th>Actions</th>
@@ -206,13 +259,26 @@ function Alerts({ token }) {
                 {alerts.map(a => (
                   <tr key={a.id}>
                     <td>{a.rule_type}</td>
-                    <td>${a.threshold.toLocaleString()}</td>
+                    <td>
+                      {a.rule_type.includes('change') || a.rule_type.includes('drop')
+                        ? `${a.threshold}%`
+                        : (() => {
+                            if (currency === 'BTC') return `₿${a.threshold.toFixed(8)}`;
+                            if (currency === 'HKD') return `HK$${a.threshold.toLocaleString()}`;
+                            return `$${a.threshold.toLocaleString()}`;
+                          })()
+                      }
+                    </td>
+                    <td style={{ color: a.last_fired ? '#e4e6eb' : '#8b8f98', fontSize: '0.85rem' }}>
+                      {a.last_fired ? timeAgo(a.last_fired) : 'Never'}
+                    </td>
                     <td>
                       <label className="toggle">
                         <input
                           type="checkbox"
                           checked={a.enabled}
                           onChange={() => handleToggle(a)}
+                          disabled={togglingIds.has(alert.id)}  // Finding: disable during toggle API call
                         />
                         <span className="toggle-slider" />
                       </label>
@@ -223,6 +289,45 @@ function Alerts({ token }) {
                         Delete
                       </button>
                     </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Alert history section */}
+      <div className="card" style={{ marginTop: '24px' }}>
+        <div className="card-title">Alert History</div>
+        {historyLoading ? (
+          <p style={{ color: '#8b8f98', textAlign: 'center', padding: '20px' }}>Loading history...</p>
+        ) : historyError ? (
+          <p style={{ color: '#f59e0b', textAlign: 'center', padding: '20px' }}>
+            Could not load alert history. The endpoint may not be available yet.
+          </p>
+        ) : history.length === 0 ? (
+          <p style={{ color: '#8b8f98', textAlign: 'center', padding: '20px' }}>
+            No alerts fired yet.
+          </p>
+        ) : (
+          <div className="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Rule Type</th>
+                  <th>Trigger Value</th>
+                  <th>Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map(h => (
+                  <tr key={h.id}>
+                    <td>{h.rule_type}</td>
+                    <td style={{ fontFamily: 'monospace' }}>
+                      {h.trigger_value ? `$${h.trigger_value.toLocaleString()}` : '—'}
+                    </td>
+                    <td className="time-ago">{timeAgo(h.created_at)}</td>
                   </tr>
                 ))}
               </tbody>
