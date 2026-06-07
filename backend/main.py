@@ -24,6 +24,35 @@ import jwt
 
 logger = logging.getLogger(__name__)
 
+# ─── Startup log ring buffer ─────────────────────────────────────────
+# Captures key startup events (DB connect, monitor launch, price cache init)
+# so the /api/health/startup-log endpoint can return them for debugging.
+# Fixed-size ring buffer to prevent unbounded memory growth (Pitfall #12).
+_MAX_STARTUP_LOG = 50
+_startup_log: list = []
+
+
+def _log_startup_event(event: str, detail: str = "") -> None:
+    """Record a startup event with timestamp. Thread-safe within asyncio."""
+    import time as _time
+    entry = {
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "event": event,
+        "detail": detail,
+    }
+    _startup_log.append(entry)
+    # Trim to max size (ring buffer behavior)
+    while len(_startup_log) > _MAX_STARTUP_LOG:
+        _startup_log.pop(0)
+    # Also emit to regular logger for container log aggregation
+    logger.info("STARTUP: %s %s", event, detail)
+
+
+def _get_startup_log_entries() -> list:
+    """Return a copy of the startup log entries."""
+    return list(_startup_log)
+
+
 # ─── Module-level imports used in endpoint bodies ───────────────────
 # (lazy imports are used for optional deps, but classify_wallet is always
 #  available and used in the dashboard endpoint)
@@ -144,10 +173,13 @@ async def startup():
         from services.crypto import _get_master_key
         _get_master_key()
         logger.info("CHAINWATCH_MASTER_KEY validated — per-user Alpaca encryption available")
+        _log_startup_event("master_key_validated")
     except ValueError as e:
         logger.warning("CHAINWATCH_MASTER_KEY not configured: %s. Per-user Alpaca key storage will fail.", e)
+        _log_startup_event("master_key_missing", str(e))
     except Exception as e:
         logger.warning("Could not validate CHAINWATCH_MASTER_KEY: %s", e)
+        _log_startup_event("master_key_error", str(e))
 
     # ── Warn if neither per-user nor shared Alpaca keys are available ──
     if not ALPACA_ALLOW_SHARED_KEYS and not ALPACA_API_KEY:
@@ -163,14 +195,17 @@ async def startup():
             max_size=10,
             command_timeout=30
         )
+        _log_startup_event("db_pool_created", f"min_size=2 max_size=10")
     except Exception as e:
         logger.warning(f"Failed to create DB pool on startup: {e}. API endpoints requiring DB will return 503.")
+        _log_startup_event("db_pool_failed", str(e))
         db_pool = None
 
     # Launch the background wallet monitor
     if db_pool:
         from services.monitor import start_monitor
         start_monitor(db_pool)
+        _log_startup_event("monitor_started", f"poll_interval=60s")
 
 
 @app.on_event("shutdown")
@@ -764,6 +799,7 @@ async def get_dashboard(user: dict = Depends(get_current_user)):
             "balance_btc": balance_btc,
             "last_balance_update": w["last_balance_update"].isoformat() if w.get("last_balance_update") else None,
             "created_at": w["created_at"].isoformat(),
+            "whale_score": float(w.get("whale_score") or 0),
         })
 
     # ── Absolute portfolio isolation ───────────────────────────────────
@@ -2213,6 +2249,20 @@ async def health_diagnostic():
     }
 
     return JSONResponse(content=report)
+
+
+@app.get("/api/health/startup-log")
+async def health_startup_log():
+    """
+    Returns the last N lines of captured startup log entries.
+    Complements /api/health/diagnostic with historical startup data:
+    DB connection attempt, monitor launch, price cache init, etc.
+    Safe: contains no secrets, only event names and timestamps.
+    """
+    return JSONResponse(content={
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "entries": _get_startup_log_entries(),
+    })
 
 
 # ─── Serve Frontend (production) ────────────────────────────────────

@@ -254,6 +254,7 @@ function Wallets({ token, currency }) {
                   <th>Address</th>
                   <th>Balance ({currency})</th>
                   <th>Type</th>
+                  <th>Score</th>
                   <th>Added</th>
                   <th>Actions</th>
                 </tr>
@@ -269,6 +270,20 @@ function Wallets({ token, currency }) {
                         {w.is_whale && <span className="tx-badge receive" style={{ marginRight: '4px' }}>Whale</span>}
                         {w.is_mine && <span className="tx-badge swap">Mine</span>}
                         {!w.is_whale && !w.is_mine && <span style={{ color: '#8b8f98' }}>Read-only</span>}
+                      </td>
+                      <td>
+                        {w.whale_score != null && w.whale_score > 0 && (
+                          <span style={{
+                            fontSize: '0.7rem',
+                            fontWeight: 600,
+                            padding: '1px 6px',
+                            borderRadius: '3px',
+                            background: w.whale_score >= 0.7 ? 'rgba(139,92,246,0.2)' : 'rgba(139,143,152,0.15)',
+                            color: w.whale_score >= 0.7 ? '#c4b5fd' : '#8b8f98',
+                          }}>
+                            Score: {(w.whale_score * 100).toFixed(0)}%
+                          </span>
+                        )}
                       </td>
                       <td className="time-ago">{new Date(w.created_at).toLocaleDateString()}</td>
                       <td>

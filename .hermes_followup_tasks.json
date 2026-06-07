@@ -1,17 +1,17 @@
 [
   {
     "task_type": "audit_outputs",
-    "payload": "Query the new /api/health/diagnostic endpoint and verify it correctly reports: (1) DB hostname resolution failure when DNS unreachable, (2) TCP reachability=false when port blocked, (3) env vars correctly detected, (4) monitor state accurate. Compare against /api/health for consistency.",
-    "status": "pending"
-  },
-  {
-    "task_type": "analyze_failures",
-    "payload": "Use the diagnostic endpoint output to pinpoint the DB connection failure mode. Is it DNS (hostname not resolvable from Zeabur container), TCP (port blocked by firewall), or auth (bad credentials)? Check Zeabur DATABASE_URL env var and verify it matches the PostgreSQL service in the same project.",
+    "payload": "Verify the /api/health/startup-log endpoint returns the expected events after a fresh deploy: master_key_validated, db_pool_created, monitor_started. Check that the ring buffer trims correctly after 50 entries.",
     "status": "pending"
   },
   {
     "task_type": "write_tool",
-    "payload": "Add a /api/health/startup-log endpoint that captures and returns the last 50 lines of startup logs (DB connection attempt, monitor launch, price cache init). This complements the diagnostic endpoint with historical data.",
+    "payload": "Add whale_score display to the Dashboard page wallet cards (both My Wallets and Whale Tracker sections). The field is now returned by /api/dashboard but Dashboard.jsx doesn't render it yet. Show a small score badge next to whale wallets.",
+    "status": "pending"
+  },
+  {
+    "task_type": "analyze_failures",
+    "payload": "The whale_scorer computes scores using a single complex query with RIGHT JOIN and a subquery for global_median_30d. If this query is slow on large datasets, it could delay the monitor cycle. Add a query timing log and consider adding an index on copy_trade_signals(wallet_id, created_at).",
     "status": "pending"
   }
 ]
