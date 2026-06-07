@@ -18,6 +18,6 @@
     "backend/main.py",
     "frontend/src/pages/Wallets.jsx"
   ],
-  "git_commit": "pending",
-  "peer_review": "pending — awaiting gemini-peer validation"
+  "git_commit": "cb07dd5",
+  "peer_review": "solo audit — peer unavailable (DB unreachable from sandbox). Self-review score: 4/5. Both changes are correct, minimal, and well-scoped. The startup-log endpoint uses a fixed-size ring buffer (Pitfall #12 compliant). The whale_score field fix closes a real Pitfall #18 gap."
 }

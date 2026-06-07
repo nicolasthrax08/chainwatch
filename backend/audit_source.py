@@ -2369,6 +2369,149 @@ def check_stale_price_cache_drift(py_files: List[str], result: AuditResult):
     # This is informational
 
 
+def check_whale_score_in_dashboard(
+    py_files: List[str], jsx_files: List[str], result: AuditResult
+):
+    """
+    New check: Verify that whale_score is rendered in the Dashboard whale
+    tracker table. The backend returns whale_score in the dashboard endpoint
+    wallet_meta (added in migration cb07dd5), but the frontend must also
+    render it. This is a Pitfall #18 (frontend-backend field contract) check.
+    """
+    # Check that backend returns whale_score in dashboard endpoint
+    backend_returns_whale_score = False
+    for fpath in py_files:
+        if fpath.endswith(("_source.py", "check_migration_status.py")):
+            continue
+        text = read_file(fpath)
+        if "whale_score" in text and "dashboard" in text.lower():
+            # Look for whale_score in the dashboard endpoint context
+            file_lines = lines(text)
+            in_dashboard = False
+            for i, line in enumerate(file_lines):
+                if "async def get_dashboard" in line or "def get_dashboard" in line:
+                    in_dashboard = True
+                elif in_dashboard and line.strip().startswith("def ") and "dashboard" not in line:
+                    in_dashboard = False
+                elif in_dashboard and "whale_score" in line:
+                    backend_returns_whale_score = True
+                    break
+            if backend_returns_whale_score:
+                break
+
+    if not backend_returns_whale_score:
+        result.add(Finding(
+            pitfall="#18",
+            severity="minor",
+            file="backend/main.py",
+            line=1,
+            description=(
+                "Dashboard endpoint may not return whale_score in wallet_meta. "
+                "The whale_scorer computes it but the dashboard response may not include it."
+            ),
+            suggestion="Add 'whale_score': float(w.get('whale_score') or 0) to the wallet_meta dict in get_dashboard.",
+        ))
+        return
+
+    # Check that Dashboard.jsx renders whale_score
+    frontend_renders_whale_score = False
+    for fpath in jsx_files:
+        if "Dashboard" not in fpath:
+            continue
+        text = read_file(fpath)
+        if "whale_score" in text:
+            frontend_renders_whale_score = True
+            break
+
+    if frontend_renders_whale_score:
+        result.add_pass(
+            "Pitfall #18: whale_score rendered in Dashboard whale tracker (field contract OK)"
+        )
+    else:
+        result.add(Finding(
+            pitfall="#18",
+            severity="minor",
+            file="frontend/src/pages/Dashboard.jsx",
+            line=1,
+            description=(
+                "Backend returns whale_score in dashboard endpoint but Dashboard.jsx "
+                "does not render it. The whale tracker table shows Chain/Label/Address/Balance "
+                "but no Score column."
+            ),
+            suggestion="Add a Score column to the Dashboard whale tracker table showing whale_score badge.",
+        ))
+
+
+def check_copy_trade_signals_performance_indexes(
+    sql_files: List[str], result: AuditResult
+):
+    """
+    New check: Verify that composite indexes exist on copy_trade_signals
+    for the whale_scorer query pattern. The scoring query filters on
+    (wallet_id, created_at) and (wallet_id, status, created_at), which
+    require composite indexes for efficient index range scans.
+
+    Without these indexes, each wallet scoring query does a full table scan
+    on copy_trade_signals, which becomes slow as the table grows.
+    """
+    all_sql = "\n".join(read_file(f) for f in sql_files)
+
+    # Check for (wallet_id, created_at) composite index
+    has_wallet_created_idx = bool(re.search(
+        r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?\w+\s+ON\s+copy_trade_signals\s*\(\s*wallet_id\s*,\s*created_at\s*\)",
+        all_sql,
+        re.IGNORECASE,
+    ))
+
+    # Check for (wallet_id, status, created_at) composite index
+    has_wallet_status_created_idx = bool(re.search(
+        r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?\w+\s+ON\s+copy_trade_signals\s*\(\s*wallet_id\s*,\s*status\s*,\s*created_at\s*\)",
+        all_sql,
+        re.IGNORECASE,
+    ))
+
+    if has_wallet_created_idx:
+        result.add_pass(
+            "Performance: copy_trade_signals(wallet_id, created_at) composite index exists"
+        )
+    else:
+        result.add(Finding(
+            pitfall="performance",
+            severity="minor",
+            file="backend/migrations/",
+            line=1,
+            description=(
+                "Missing composite index on copy_trade_signals(wallet_id, created_at). "
+                "The whale_scorer query filters on both columns but no matching index exists. "
+                "This causes full table scans on every wallet scoring operation."
+            ),
+            suggestion=(
+                "Add: CREATE INDEX idx_copy_trade_signals_wallet_created "
+                "ON copy_trade_signals(wallet_id, created_at);"
+            ),
+        ))
+
+    if has_wallet_status_created_idx:
+        result.add_pass(
+            "Performance: copy_trade_signals(wallet_id, status, created_at) composite index exists"
+        )
+    else:
+        result.add(Finding(
+            pitfall="performance",
+            severity="minor",
+            file="backend/migrations/",
+            line=1,
+            description=(
+                "Missing composite index on copy_trade_signals(wallet_id, status, created_at). "
+                "The execution rate calculation filters on all three columns."
+            ),
+            suggestion=(
+                "Add: CREATE INDEX idx_copy_trade_signals_wallet_status_created "
+                "ON copy_trade_signals(wallet_id, status, created_at);"
+            ),
+        ))
+
+
 def run_audit(base_path: str) -> AuditResult:
     result = AuditResult()
 
@@ -2422,6 +2565,8 @@ def run_audit(base_path: str) -> AuditResult:
     check_coingecko_response_shape(py_files, result)
     check_whale_score_threshold(py_files, result)
     check_stale_price_cache_drift(py_files, result)
+    check_whale_score_in_dashboard(py_files, jsx_files, result)
+    check_copy_trade_signals_performance_indexes(sql_files, result)
 
     return result
 

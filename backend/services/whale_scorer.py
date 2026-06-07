@@ -12,8 +12,14 @@ Cold-start blend (when signal count is low):
 """
 import logging
 import math
+import time as _time
 
 logger = logging.getLogger("chainwatch.whale_scorer")
+
+# ── Query timing threshold ────────────────────────────────────────────
+# If the scoring query exceeds this duration (ms), emit a WARNING so
+# the operator can investigate before it causes monitor cycle overruns.
+SCORE_QUERY_SLOW_THRESHOLD_MS = 500
 
 
 async def score_whale_wallet(conn, wallet_id: str) -> dict:
@@ -32,6 +38,7 @@ async def score_whale_wallet(conn, wallet_id: str) -> dict:
     """
 
     # ── Fetch all features in a single query ──────────────────────────
+    _t0 = _time.monotonic()
     row = await conn.fetchrow(
         """
         SELECT
@@ -69,6 +76,8 @@ async def score_whale_wallet(conn, wallet_id: str) -> dict:
             ) FILTER (WHERE cts.created_at >= NOW() - INTERVAL '30 days')
                 AS median_signal_amount_30d,
             -- Global whale median fallback (all whale wallet signals in 30d)
+            -- NOTE: This subquery runs once per wallet. For large whale sets,
+            -- consider pre-computing global_median once per monitor cycle.
             (
                 SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY cts2.amount_usd)
                 FROM copy_trade_signals cts2
@@ -100,6 +109,17 @@ async def score_whale_wallet(conn, wallet_id: str) -> dict:
         """,
         wallet_id,
     )
+    _elapsed_ms = (_time.monotonic() - _t0) * 1000
+    if _elapsed_ms > SCORE_QUERY_SLOW_THRESHOLD_MS:
+        logger.warning(
+            "score_whale_wallet SLOW query: wallet=%s elapsed=%.1fms (threshold=%dms)",
+            wallet_id, _elapsed_ms, SCORE_QUERY_SLOW_THRESHOLD_MS,
+        )
+    else:
+        logger.debug(
+            "score_whale_wallet query: wallet=%s elapsed=%.1fms",
+            wallet_id, _elapsed_ms,
+        )
 
     # Wallet not found
     if row is None:

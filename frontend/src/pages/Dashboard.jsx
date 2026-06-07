@@ -437,6 +437,7 @@ function Dashboard({ token, currency }) {
                     <th>Label</th>
                     <th>Address</th>
                     <th>Balance</th>
+                    <th>Score</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -464,6 +465,22 @@ function Dashboard({ token, currency }) {
                               boxShadow: '0 0 4px rgba(16,185,129,0.6)',
                             }}
                           />
+                        )}
+                      </td>
+                      <td>
+                        {w.whale_score != null && w.whale_score > 0 ? (
+                          <span style={{
+                            fontSize: '0.7rem',
+                            fontWeight: 600,
+                            padding: '1px 6px',
+                            borderRadius: '3px',
+                            background: w.whale_score >= 0.7 ? 'rgba(139,92,246,0.2)' : 'rgba(139,143,152,0.15)',
+                            color: w.whale_score >= 0.7 ? '#c4b5fd' : '#8b8f98',
+                          }}>
+                            {(w.whale_score * 100).toFixed(0)}%
+                          </span>
+                        ) : (
+                          <span style={{ color: '#8b8f98', fontSize: '0.75rem' }}>—</span>
                         )}
                       </td>
                     </tr>
