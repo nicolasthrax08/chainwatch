@@ -1,10 +1,10 @@
 {
-  "id": 23,
+  "id": 27,
   "task_type": "write_tool",
-  "payload": "{\"description\": \"Fix refresh_wallet to use live CoinGecko prices instead of _APPROX_PRICE_USD for balance conversion\", \"priority\": \"high\"}",
+  "payload": "{\"description\": \"Add /api/health/diagnostic endpoint for startup debugging\", \"priority\": \"high\"}",
   "status": "done",
-  "created_at": "2026-06-07T00:00:00Z",
-  "updated_at": "2026-06-07T00:15:00Z",
-  "result": "{\"fixes_applied\": [\"Replaced _APPROX_PRICE_USD usage in refresh_wallet with live CoinGecko API call (main.py:1013-1045)\", \"Added audit check #28 to detect _APPROX_PRICE_USD used for direct balance conversion (audit_source.py:1513-1560)\"], \"files_modified\": [\"backend/main.py\", \"backend/audit_source.py\"], \"critical_findings\": 0, \"minor_findings\": 0, \"audit_checks_total\": 27, \"git_commit\": \"c2c35e1\"}",
-  "critique": "solo audit — peer unavailable (DB unreachable from sandbox). Self-review score: 4/5. The fix is targeted: refresh_wallet now fetches live per-token prices from CoinGecko with proper fallback to _APPROX_PRICE_USD on failure. The new audit check #28 prevents regression. All 27/27 checks pass."
+  "created_at": "2026-06-07T10:00:00Z",
+  "updated_at": "2026-06-07T10:15:00Z",
+  "result": "{\"endpoint\": \"GET /api/health/diagnostic\", \"checks\": [\"DATABASE_URL parse & DNS resolution\", \"DB connectivity test (SELECT 1)\", \"TCP reachability (raw socket, 5s timeout)\", \"Environment variable presence (12 vars)\", \"Monitor state (alive, poll interval, price cache)\", \"Migration log summary\", \"System info\"], \"files_modified\": [\"backend/main.py\"], \"lines_added\": 139, \"audit_checks_total\": 90, \"git_commit\": \"c16abd2\"}",
+  "critique": "solo audit — peer unavailable (DB unreachable from sandbox). Self-review score: 4/5. The diagnostic endpoint is well-structured: 7 independent checks, each wrapped in try/except, no secret leakage, no DB writes, proper timeout handling. The endpoint directly addresses OBS-2 from the previous audit (DB connection failure cascade). One minor concern: the endpoint is unauthenticated — same as /api/health, which is acceptable for a health check but worth noting if sensitive env var names are considered information disclosure."
 }

@@ -1,12 +1,17 @@
 [
   {
     "task_type": "audit_outputs",
-    "payload": "Verify the migration 007 was applied correctly and balance_hkd/balance_btc columns exist in the live DB. Check that monitor Phase 5 UPDATE now writes all currency columns.",
+    "payload": "Query the new /api/health/diagnostic endpoint and verify it correctly reports: (1) DB hostname resolution failure when DNS unreachable, (2) TCP reachability=false when port blocked, (3) env vars correctly detected, (4) monitor state accurate. Compare against /api/health for consistency.",
     "status": "pending"
   },
   {
-    "task_type": "review_thresholds",
-    "payload": "Review the MIN_SIGNAL_USD threshold ($1000) and POLL_INTERVAL (60s) in the monitor. Consider whether these values are still optimal given current market conditions.",
+    "task_type": "analyze_failures",
+    "payload": "Use the diagnostic endpoint output to pinpoint the DB connection failure mode. Is it DNS (hostname not resolvable from Zeabur container), TCP (port blocked by firewall), or auth (bad credentials)? Check Zeabur DATABASE_URL env var and verify it matches the PostgreSQL service in the same project.",
+    "status": "pending"
+  },
+  {
+    "task_type": "write_tool",
+    "payload": "Add a /api/health/startup-log endpoint that captures and returns the last 50 lines of startup logs (DB connection attempt, monitor launch, price cache init). This complements the diagnostic endpoint with historical data.",
     "status": "pending"
   }
 ]
