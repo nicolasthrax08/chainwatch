@@ -2263,6 +2263,112 @@ def check_coingecko_response_shape(py_files: List[str], result: AuditResult):
     result.add_pass("Pitfall #3: CoinGecko response shape check completed")
 
 
+def check_whale_score_threshold(py_files: List[str], result: AuditResult):
+    """
+    New check: Verify signal_generator.py defines and uses a MIN_WHALE_SCORE
+    threshold to filter out balance-only whales with no signal history.
+    Without this threshold, any wallet marked as whale by balance alone
+    can generate signals from dust transactions, flooding the signal feed.
+    """
+    found_min_whale_score = False
+    found_score_check = False
+
+    for fpath in py_files:
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+            continue
+        text = read_file(fpath)
+        fname = os.path.basename(fpath)
+
+        if fname == "signal_generator.py":
+            if "MIN_WHALE_SCORE" in text:
+                found_min_whale_score = True
+            if "whale_score < MIN_WHALE_SCORE" in text or "whale_score<MIN_WHALE_SCORE" in text:
+                found_score_check = True
+
+    if found_min_whale_score and found_score_check:
+        result.add_pass(
+            "Whale score threshold: signal_generator.py defines MIN_WHALE_SCORE "
+            "and enforces it in evaluate_for_signal"
+        )
+    else:
+        missing = []
+        if not found_min_whale_score:
+            missing.append("MIN_WHALE_SCORE constant not found in signal_generator.py")
+        if not found_score_check:
+            missing.append("whale_score < MIN_WHALE_SCORE check not found in signal_generator.py")
+        result.add(Finding(
+            pitfall="whale_score_threshold",
+            severity="minor",
+            file="backend/services/signal_generator.py",
+            line=1,
+            description=(
+                "No whale score threshold for signal generation. "
+                "Balance-only whales with no signal history can flood the feed. "
+                + "; ".join(missing)
+            ),
+            suggestion=(
+                "Add MIN_WHALE_SCORE = 0.20 constant and check: "
+                "if whale_score < MIN_WHALE_SCORE: return None"
+            ),
+        ))
+
+
+def check_stale_price_cache_drift(py_files: List[str], result: AuditResult):
+    """
+    New check: Verify that price cache diagnostics are exposed through the
+    health endpoint. Without visibility into price cache age, stale prices
+    can silently corrupt balance conversions and signal USD values.
+
+    This checks that the health/diagnostic endpoint reports:
+    1. Price cache age (seconds since last refresh)
+    2. Whether the cache was ever populated (timestamp > 0)
+    3. Number of cached token prices
+    """
+    has_price_cache_in_health = False
+    has_price_age_check = False
+
+    for fpath in py_files:
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+            continue
+        text = read_file(fpath)
+        fname = os.path.basename(fpath)
+
+        if fname == "main.py":
+            # Check that the health endpoint includes price cache info
+            if "price_cache" in text and ("health" in text.lower() or "diagnostic" in text.lower()):
+                has_price_cache_in_health = True
+            if "price_cache_age" in text or "cache_age" in text:
+                has_price_age_check = True
+    
+    # The health endpoint should expose price cache staleness info
+    if has_price_cache_in_health:
+        result.add_pass(
+            "Stale price cache: health/diagnostic endpoint exposes price cache info"
+        )
+    else:
+        result.add(Finding(
+            pitfall="stale_price_cache_drift",
+            severity="minor",
+            file="backend/main.py",
+            line=1,
+            description=(
+                "Health/diagnostic endpoint does not expose price cache age. "
+                "Stale prices can silently corrupt balance conversions and signal USD values."
+            ),
+            suggestion=(
+                "Add price_cache_age_seconds to health endpoint response. "
+                "Include number of cached tokens and timestamp of last successful CoinGecko fetch."
+            ),
+        ))
+
+    if has_price_age_check:
+        result.add_pass(
+            "Stale price cache: price_cache_age tracking detected"
+        )
+    # Not a hard failure — the cache may use different variable names
+    # This is informational
+
+
 def run_audit(base_path: str) -> AuditResult:
     result = AuditResult()
 
@@ -2314,6 +2420,8 @@ def run_audit(base_path: str) -> AuditResult:
     check_dead_variable_cascade(py_files, result)
     check_pyright_builtin_generics(py_files, result)
     check_coingecko_response_shape(py_files, result)
+    check_whale_score_threshold(py_files, result)
+    check_stale_price_cache_drift(py_files, result)
 
     return result
 

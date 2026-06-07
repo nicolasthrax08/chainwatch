@@ -21,6 +21,14 @@ MIN_SIGNAL_USD_BY_CHAIN: dict = {
 MIN_SIGNAL_USD_DEFAULT = 5000.0  # fallback for any future chain
 DEDUP_INTERVAL = "5 minutes"
 
+# Minimum whale score threshold (0.0-1.0) for signal generation.
+# Wallets with whale_score below this value will not generate signals,
+# even if the transaction amount exceeds MIN_SIGNAL_USD_BY_CHAIN.
+# Default: 0.20 (20%), lenient enough to include new/cold-start whales
+# but strict enough to filter out wallets that were marked whale by
+# balance alone with zero signal history.
+MIN_WHALE_SCORE = 0.20
+
 # Finding 5: In-memory dedup cache with TTL to prevent signal dedup race condition
 # Maps (wallet_id, token_symbol, action) → insertion_timestamp
 _signal_dedup_cache: Dict[Tuple[str, str, str], float] = {}
@@ -216,6 +224,15 @@ async def evaluate_for_signal(
     # Use chain-specific minimum threshold to filter dust txns from whales
     _min_usd = MIN_SIGNAL_USD_BY_CHAIN.get(chain.lower(), MIN_SIGNAL_USD_DEFAULT)
     if amount_usd < _min_usd:
+        return None
+
+    # Whale score threshold: skip signals from wallets with very low whale scores
+    # This prevents balance-only whales with no signal history from generating noise
+    if whale_score < MIN_WHALE_SCORE:
+        logger.debug(
+            "Signal suppressed: wallet=%s whale_score=%.2f < MIN_WHALE_SCORE=%.2f",
+            wallet_id, whale_score, MIN_WHALE_SCORE,
+        )
         return None
 
     # Normalize token symbol
