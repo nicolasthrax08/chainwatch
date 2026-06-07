@@ -1,12 +1,12 @@
 [
   {
-    "task_type": "write_tool",
-    "payload": "Fix verify_deploy.py: move 'import httpx' from inside try/except to module level (Pitfall #6). Currently at line 34, the import is inside a try block without a module-level fallback.",
+    "task_type": "audit_outputs",
+    "payload": "Verify the migration 007 was applied correctly and balance_hkd/balance_btc columns exist in the live DB. Check that monitor Phase 5 UPDATE now writes all currency columns.",
     "status": "pending"
   },
   {
-    "task_type": "analyze_failures",
-    "payload": "Investigate the remaining infrastructure issues: (1) PostgreSQL connection failing in production (in-memory fallback), (2) Stale deployed code. These require Zeabur redeployment and cannot be fixed from the sandbox.",
+    "task_type": "review_thresholds",
+    "payload": "Review the MIN_SIGNAL_USD threshold ($1000) and POLL_INTERVAL (60s) in the monitor. Consider whether these values are still optimal given current market conditions.",
     "status": "pending"
   }
 ]

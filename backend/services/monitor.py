@@ -47,6 +47,8 @@ _price_cache: Dict[str, float] = {
     "ETH": 2500.0,
     "SOL": 170.0,
     "BTC": 105000.0,
+    "USDHKD": 7.8,
+    "USDBTC": 1.0 / 105000.0,
     "timestamp": 0.0,
 }
 
@@ -268,13 +270,21 @@ async def _poll_all_wallets_inner() -> None:
                     # prev_balance was already batch-fetched above into _prev_balance_map
                     # (MED-2 fix: no per-row SELECT here — avoids N+1 round-trips in transaction)
 
+                    # Compute all currency balances from the USD value and cross-rates
+                    _usd_hkd = _price_cache.get("USDHKD", 7.8)
+                    _usd_btc = _price_cache.get("USDBTC", 1.0 / 105000.0)
+                    _bal_hkd = round(bal_usd * _usd_hkd, 2)
+                    _bal_btc = round(bal_usd * _usd_btc, 8)
+
                     await conn.execute("""
                         UPDATE wallets
                         SET balance_usd     = $1,
                             balance_native   = $2,
-                            last_balance_update = $3
-                        WHERE id = $4
-                    """, bal_usd, bal_native, datetime.utcnow(), wid)
+                            balance_hkd      = $3,
+                            balance_btc      = $4,
+                            last_balance_update = $5
+                        WHERE id = $6
+                    """, bal_usd, bal_native, _bal_hkd, _bal_btc, datetime.utcnow(), wid)
 
                     if new_tx_hash:
                         # Stablecoins (USDC, USDT, DAI, etc.) should use $1.0 price,
@@ -635,26 +645,49 @@ async def _ensure_prices_fetched() -> None:
             resp = await cg_client.get(
                 "https://api.coingecko.com/api/v3/simple/price",
                 params={
-                    "ids": "ethereum,solana,bitcoin",
-                    "vs_currencies": "usd",
+                    "ids": "ethereum",
+                    "vs_currencies": "usd,hkd,btc",
                 },
             )
             resp.raise_for_status()
             data = resp.json()
 
-            eth_usd = data.get("ethereum", {}).get("usd", 0)
-            sol_usd = data.get("solana", {}).get("usd", 0)
-            btc_usd = data.get("bitcoin", {}).get("usd", 0)
+            eth = data.get("ethereum", {})
+            eth_usd = eth.get("usd", 0)
+            eth_hkd = eth.get("hkd", 0)
+            eth_btc = eth.get("btc", 0)
+
+            # Also fetch SOL and BTC in USD for their price cache entries
+            resp2 = await cg_client.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={
+                    "ids": "solana,bitcoin",
+                    "vs_currencies": "usd",
+                },
+            )
+            resp2.raise_for_status()
+            data2 = resp2.json()
+            sol_usd = data2.get("solana", {}).get("usd", 0)
+            btc_usd = data2.get("bitcoin", {}).get("usd", 0)
 
             _price_cache["ETH"] = eth_usd if eth_usd > 0 else _price_cache.get("ETH", 0.0)
             _price_cache["SOL"] = sol_usd if sol_usd > 0 else _price_cache.get("SOL", 0.0)
             _price_cache["BTC"] = btc_usd if btc_usd > 0 else _price_cache.get("BTC", 0.0)
+
+            # Compute cross-rates from ETH/USD base
+            if eth_usd > 0:
+                if eth_hkd > 0:
+                    _price_cache["USDHKD"] = eth_hkd / eth_usd
+                if eth_btc > 0:
+                    _price_cache["USDBTC"] = eth_btc / eth_usd
+
             _price_cache["timestamp"] = now
 
             if _price_cache["ETH"] > 0:
                 logger.info(
                     f"Price cache refreshed: ETH=${_price_cache['ETH']}, "
-                    f"SOL=${_price_cache['SOL']}, BTC=${_price_cache['BTC']}"
+                    f"SOL=${_price_cache['SOL']}, BTC=${_price_cache['BTC']}, "
+                    f"USDHKD={_price_cache['USDHKD']:.4f}"
                 )
         except Exception as e:
             logger.warning(f"Price refresh failed (using stale): {e}")

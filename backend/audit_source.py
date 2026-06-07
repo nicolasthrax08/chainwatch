@@ -290,23 +290,39 @@ def check_columns_exist_in_schema(py_files: List[str], sql_files: List[str], res
     # Now extract column references from Python SQL strings
     # Look for SET col = $N (UPDATE) and INSERT INTO table (cols)
     update_pattern = re.compile(r"SET\s+(\w+)\s*=\s*\$", re.IGNORECASE)
+    # Multi-line UPDATE pattern: match UPDATE table ... SET col = $N across lines
+    update_block_pattern = re.compile(
+        r"UPDATE\s+(\w+)\s+SET\s+((?:\w+\s*=\s*\$\d+\s*,?\s*\n?)+)",
+        re.IGNORECASE | re.DOTALL,
+    )
     select_pattern = re.compile(r"SELECT.*?FROM\s+(\w+)", re.IGNORECASE | re.DOTALL)
 
     for fpath in py_files:
+        if _is_own_source(fpath):
+            continue
         text = read_file(fpath)
-        # Simple heuristic: find table references and column references
-        for table_name, cols in schema.items():
-            # Check UPDATE statements
-            for i, line in enumerate(lines(text), 1):
-                if re.search(rf"\b{table_name}\b", line, re.IGNORECASE):
-                    # Check for column references in the same or nearby lines
-                    for col_m in update_pattern.finditer(line):
-                        col = col_m.group(1).lower()
-                        if col not in cols and col not in ("where", "set", "and", "or"):
-                            # Only flag if it looks like a column assignment
-                            pass  # Too many false positives for now
 
-        # Check INSERT INTO table (col1, col2, ...) statements
+        # ── Check UPDATE statements (multi-line, e.g. triple-quoted SQL) ──
+        for m in update_block_pattern.finditer(text):
+            table = m.group(1).lower()
+            set_block = m.group(2)
+            if table in schema:
+                for col_m in re.finditer(r"(\w+)\s*=\s*\$\d+", set_block):
+                    col = col_m.group(1).lower()
+                    if col not in schema[table] and col not in ("where", "set", "and", "or"):
+                        # Find line number
+                        pos = m.start()
+                        line_num = text[:pos].count("\n") + 1
+                        result.add(Finding(
+                            pitfall="#20",
+                            severity="critical",
+                            file=fpath,
+                            line=line_num,
+                            description=f"UPDATE references {table}.{col} but column not in schema",
+                            suggestion=f"Add column {table}.{col} via migration or fix the UPDATE",
+                        ))
+
+        # ── Check INSERT INTO table (col1, col2, ...) statements ──
         insert_pattern = re.compile(
             rf"INSERT\s+INTO\s+(\w+)\s*\(([^)]+)\)",
             re.IGNORECASE,
