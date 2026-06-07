@@ -1571,6 +1571,106 @@ def check_approx_price_not_used_for_balance(py_files: List[str], result: AuditRe
     result.add_pass("Pitfall #28: _APPROX_PRICE_USD not used for direct balance conversion")
 
 
+def check_on_conflict_exact_column_match(py_files, sql_files, result):
+    """
+    Pitfall #19 (enhanced): Every ON CONFLICT (col1, col2, ...) must have a matching
+    UNIQUE constraint on EXACTLY those columns (order-insensitive). This catches the
+    case where a constraint exists but on a different column set, which silently
+    allows duplicates.
+
+    Example: code has ON CONFLICT (wallet_id, token_symbol, action, amount_usd)
+    but the UNIQUE constraint is on (wallet_id, token_symbol, created_at) - different columns!
+    The ON CONFLICT would silently do nothing (never matches) or match on wrong criteria.
+    """
+    # Collect all explicit ON CONFLICT usages with their column lists
+    on_conflict_usages = []  # (file, line_num, table, conflict_cols_set)
+    pattern = re.compile(
+        r"ON\s+CONFLICT\s*\((?P<cols>[^)]+)\)\s*(?:DO\s+NOTHING|DO\s+UPDATE)",
+        re.IGNORECASE,
+    )
+
+    for fpath in py_files:
+        if fpath.endswith("audit_source.py"):
+            continue
+        text = read_file(fpath)
+        file_lines = lines(text)
+        for i, line in enumerate(file_lines, 1):
+            m = pattern.search(line)
+            if m:
+                # Infer table from nearby INSERT INTO (10-line lookback)
+                context_lines = file_lines[max(0, i - 10):i]
+                context = "\n".join(context_lines)
+                table_m = re.search(r"INSERT\s+INTO\s+(\w+)", context, re.IGNORECASE)
+                table = table_m.group(1) if table_m else "unknown"
+                # Normalize column set: strip whitespace, lowercase, sort
+                cols_raw = m.group("cols")
+                cols_set = frozenset(c.strip().lower() for c in cols_raw.split(","))
+                on_conflict_usages.append((fpath, i, table.lower(), cols_set))
+
+    if not on_conflict_usages:
+        result.add_pass("Pitfall #19 (enhanced): No explicit ON CONFLICT (cols) usages found")
+        return
+
+    # Collect all unique constraints from SQL files
+    all_sql = "\n".join(read_file(f) for f in sql_files)
+    constraints_by_table = {}  # table -> list of frozensets of columns
+
+    constraint_pattern = re.compile(
+        r"(?:CONSTRAINT\s+\w+\s+)?UNIQUE\s*\(([^)]+)\)",
+        re.IGNORECASE,
+    )
+    for m in constraint_pattern.finditer(all_sql):
+        cols = frozenset(c.strip().lower() for c in m.group(1).split(","))
+        constraints_by_table.setdefault("__global__", set()).add(cols)
+
+    unique_index_pattern = re.compile(
+        r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?\w+\s+ON\s+(\w+)\s*\(([^)]+)\)",
+        re.IGNORECASE,
+    )
+    for m in unique_index_pattern.finditer(all_sql):
+        table = m.group(1).lower()
+        cols = frozenset(c.strip().lower() for c in m.group(2).split(","))
+        constraints_by_table.setdefault(table, set()).add(cols)
+
+    # Parse inline UNIQUE from CREATE TABLE blocks
+    create_tables = _extract_create_table_blocks(all_sql)
+    for table, cols_block in create_tables.items():
+        inline_unique = re.compile(r"(\w+)\s+\w+.*(?:PRIMARY\s+KEY|UNIQUE)", re.IGNORECASE)
+        for m2 in inline_unique.finditer(cols_block):
+            col = m2.group(1).lower()
+            constraints_by_table.setdefault(table.lower(), set()).add(frozenset([col]))
+
+    # Check each ON CONFLICT usage for an exact column match
+    for fpath, line_num, table, cols_set in on_conflict_usages:
+        table_constraints = constraints_by_table.get(table, set())
+        global_constraints = constraints_by_table.get("__global__", set())
+        all_constraints = table_constraints | global_constraints
+
+        found = cols_set in all_constraints
+        if not found:
+            found = any(cols_set.issubset(c) for c in all_constraints)
+
+        if not found:
+            result.add(Finding(
+                pitfall="#19",
+                severity="critical",
+                file=fpath,
+                line=line_num,
+                description=(
+                    f"ON CONFLICT on {table} ({', '.join(sorted(cols_set))}) - "
+                    f"no matching UNIQUE constraint on exactly these columns in migrations"
+                ),
+                suggestion=(
+                    f"Add UNIQUE constraint on {table}({', '.join(sorted(cols_set))}) via migration"
+                ),
+            ))
+        else:
+            result.add_pass(
+                f"Pitfall #19 (enhanced): ON CONFLICT on {table} "
+                f"({', '.join(sorted(cols_set))}) has exact column match"
+            )
+
+
 def run_audit(base_path: str) -> AuditResult:
     result = AuditResult()
 
@@ -1604,6 +1704,7 @@ def run_audit(base_path: str) -> AuditResult:
     check_cron_secret_fail_closed(py_files, result)
     check_frontend_backend_field_contract(py_files, jsx_files, sql_files, result)
     check_approx_price_not_used_for_balance(py_files, result)
+    check_on_conflict_exact_column_match(py_files, sql_files, result)
 
     return result
 
