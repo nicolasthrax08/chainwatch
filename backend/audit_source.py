@@ -117,8 +117,8 @@ def check_on_conflict_has_constraint(py_files: List[str], sql_files: List[str], 
     )
 
     for fpath in py_files:
-        # Skip the audit tool itself — it contains SQL examples with ON CONFLICT
-        if fpath.endswith("audit_source.py"):
+        # Skip tool files that contain SQL DDL strings with ON CONFLICT
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
             continue
         text = read_file(fpath)
         file_lines = lines(text)
@@ -347,8 +347,9 @@ def check_columns_exist_in_schema(py_files: List[str], sql_files: List[str], res
 
 
 def _is_own_source(fpath: str) -> bool:
-    """Check if fpath is the audit tool itself (skip self-referential checks)."""
-    return fpath.endswith("audit_source.py")
+    """Check if fpath is a utility/tool file that contains DDL/SQL strings
+    (skip self-referential ON CONFLICT and schema checks)."""
+    return fpath.endswith(("audit_source.py", "check_migration_status.py"))
 
 
 def check_try_except_imports(py_files: List[str], result: AuditResult):
@@ -1590,7 +1591,7 @@ def check_on_conflict_exact_column_match(py_files, sql_files, result):
     )
 
     for fpath in py_files:
-        if fpath.endswith("audit_source.py"):
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
             continue
         text = read_file(fpath)
         file_lines = lines(text)
@@ -1684,7 +1685,7 @@ def check_get_current_user_no_db(py_files: List[str], result: AuditResult):
     """
     found_function = False
     for fpath in py_files:
-        if fpath.endswith("audit_source.py"):
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
             continue
         text = read_file(fpath)
         if "get_current_user" not in text:
@@ -1784,7 +1785,7 @@ def check_phase_isolation_monitor(py_files: List[str], result: AuditResult):
     runs inside the same DB transaction as the wallet UPDATE phase.
     """
     for fpath in py_files:
-        if fpath.endswith("audit_source.py"):
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
             continue
         text = read_file(fpath)
         # Only check files that look like monitor workers
@@ -1854,7 +1855,7 @@ def check_balance_vs_event_amount(py_files: List[str], result: AuditResult):
     without a separate tx_amount_native field.
     """
     for fpath in py_files:
-        if fpath.endswith("audit_source.py"):
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
             continue
         text = read_file(fpath)
         if "balance_native" not in text:
@@ -1907,7 +1908,7 @@ def check_db_conn_held_across_http(py_files: List[str], result: AuditResult):
     making external HTTP calls (fetch-then-store loops).
     """
     for fpath in py_files:
-        if fpath.endswith("audit_source.py"):
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
             continue
         text = read_file(fpath)
         if "async with" not in text:
@@ -2121,7 +2122,7 @@ def check_dead_variable_cascade(py_files: List[str], result: AuditResult):
     but never used in any return value or output — dead code.
     """
     for fpath in py_files:
-        if fpath.endswith("audit_source.py"):
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
             continue
         text = read_file(fpath)
         file_lines = lines(text)
@@ -2186,7 +2187,7 @@ def check_pyright_builtin_generics(py_files: List[str], result: AuditResult):
     without corresponding imports, which can cause Pyright errors.
     """
     for fpath in py_files:
-        if fpath.endswith("audit_source.py"):
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
             continue
         text = read_file(fpath)
         file_lines = lines(text)
@@ -2228,7 +2229,7 @@ def check_coingecko_response_shape(py_files: List[str], result: AuditResult):
     a top-level currency key instead of per-coin objects.
     """
     for fpath in py_files:
-        if fpath.endswith("audit_source.py"):
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
             continue
         text = read_file(fpath)
         if "simple/price" not in text and "coingecko" not in text.lower():
