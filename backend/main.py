@@ -2076,6 +2076,145 @@ async def health_check():
     return JSONResponse(content=report, status_code=status_code)
 
 
+@app.get("/api/health/diagnostic")
+async def health_diagnostic():
+    """
+    Startup diagnostic endpoint — helps debug connection and configuration issues.
+    Reports: DB hostname resolution, DATABASE_URL parse, env var presence,
+    monitor state, price cache state, and migration log summary.
+    Safe to expose: does not leak secrets (masks API keys, shows only presence).
+    """
+    import socket as _socket
+    import time as _time
+
+    report = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "checks": {},
+    }
+
+    # ── 1. DATABASE_URL parse & hostname resolution ──
+    db_url = os.environ.get("DATABASE_URL", "")
+    db_host = None
+    db_port = None
+    db_name = None
+    db_resolution = None
+    if db_url:
+        try:
+            # Parse: postgresql://user:pass@host:port/dbname
+            from urllib.parse import urlparse
+            parsed = urlparse(db_url)
+            db_host = parsed.hostname
+            db_port = parsed.port
+            db_name = parsed.path.lstrip("/") if parsed.path else None
+            # Attempt DNS resolution
+            if db_host:
+                try:
+                    resolved = _socket.getaddrinfo(db_host, None, _socket.AF_INET)
+                    db_resolution = resolved[0][4][0] if resolved else None
+                except Exception as e:
+                    db_resolution = f"FAILED: {e}"
+        except Exception as e:
+            report["checks"]["db_url"] = {"error": f"Parse failed: {e}"}
+    report["checks"]["db_url"] = {
+        "configured": bool(db_url),
+        "host": db_host,
+        "port": db_port,
+        "database": db_name,
+        "resolved_ip": db_resolution,
+        "reachable": None,  # filled below
+    }
+
+    # ── 2. DB connectivity test (with timeout) ──
+    db_reachable = False
+    db_error = None
+    if db_pool is not None:
+        try:
+            t0 = _time.monotonic()
+            async with db_pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            db_reachable = True
+            report["checks"]["db_url"]["latency_ms"] = round((_time.monotonic() - t0) * 1000, 1)
+        except Exception as e:
+            db_error = str(e)
+    else:
+        db_error = "db_pool is None — startup handler failed to create pool"
+    report["checks"]["db_url"]["reachable"] = db_reachable
+    if db_error:
+        report["checks"]["db_url"]["error"] = db_error
+
+    # ── 3. TCP reachability to DB host:port (independent of asyncpg) ──
+    if db_host and db_port:
+        try:
+            t0 = _time.monotonic()
+            sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            sock.settimeout(5)
+            result = sock.connect_ex((db_host, db_port))
+            sock.close()
+            report["checks"]["db_url"]["tcp_reachable"] = result == 0
+            report["checks"]["db_url"]["tcp_latency_ms"] = round((_time.monotonic() - t0) * 1000, 1)
+        except Exception as e:
+            report["checks"]["db_url"]["tcp_reachable"] = False
+            report["checks"]["db_url"]["tcp_error"] = str(e)
+
+    # ── 4. Environment variable presence (not values) ──
+    report["checks"]["env"] = {
+        "DATABASE_URL": bool(os.environ.get("DATABASE_URL")),
+        "CRON_SECRET": bool(os.environ.get("CRON_SECRET")),
+        "CHAINWATCH_MASTER_KEY": bool(os.environ.get("CHAINWATCH_MASTER_KEY")),
+        "ETHERSCAN_API_KEY": bool(os.environ.get("ETHERSCAN_API_KEY")),
+        "SOLSCAN_API_KEY": bool(os.environ.get("SOLSCAN_API_KEY")),
+        "BLOCKCHAIR_API_KEY": bool(os.environ.get("BLOCKCHAIR_API_KEY")),
+        "TELEGRAM_BOT_TOKEN": bool(os.environ.get("TELEGRAM_BOT_TOKEN")),
+        "ALPACA_API_KEY": bool(os.environ.get("ALPACA_API_KEY")),
+        "ALPACA_API_SECRET": bool(os.environ.get("ALPACA_API_SECRET")),
+        "JWT_SECRET": bool(os.environ.get("JWT_SECRET")),
+        "ENV": os.environ.get("ENV", "not set"),
+        "PORT": os.environ.get("PORT", "not set"),
+    }
+
+    # ── 5. Monitor state ──
+    try:
+        from services.monitor import is_monitor_alive, _price_cache, POLL_INTERVAL, MAX_CONSECUTIVE_ERRORS
+        monitor_alive = is_monitor_alive()
+        cache_age = _time.time() - _price_cache.get("timestamp", 0)
+        report["checks"]["monitor"] = {
+            "alive": monitor_alive,
+            "poll_interval_s": POLL_INTERVAL,
+            "max_consecutive_errors": MAX_CONSECUTIVE_ERRORS,
+            "price_cache_age_s": round(cache_age, 1),
+            "price_cache_fresh": cache_age < 120,
+            "price_cache_eth": _price_cache.get("ETH", 0),
+            "price_cache_sol": _price_cache.get("SOL", 0),
+            "price_cache_btc": _price_cache.get("BTC", 0),
+        }
+    except Exception as e:
+        report["checks"]["monitor"] = {"error": str(e)}
+
+    # ── 6. Migration log summary ──
+    if db_pool is not None and db_reachable:
+        try:
+            async with db_pool.acquire() as conn:
+                applied = await conn.fetch(
+                    "SELECT filename, applied_at FROM _migration_log ORDER BY applied_at"
+                )
+                report["checks"]["migrations"] = {
+                    "applied_count": len(applied),
+                    "latest": applied[-1]["filename"] if applied else None,
+                    "latest_at": str(applied[-1]["applied_at"]) if applied else None,
+                }
+        except Exception as e:
+            report["checks"]["migrations"] = {"error": str(e)}
+
+    # ── 7. System info ──
+    report["checks"]["system"] = {
+        "hostname": _socket.gethostname(),
+        "python_version": __import__("sys").version.split()[0],
+        "cwd": os.getcwd(),
+    }
+
+    return JSONResponse(content=report)
+
+
 # ─── Serve Frontend (production) ────────────────────────────────────
 
 from fastapi.staticfiles import StaticFiles
