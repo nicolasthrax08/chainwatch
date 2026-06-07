@@ -1671,6 +1671,597 @@ def check_on_conflict_exact_column_match(py_files, sql_files, result):
             )
 
 
+# ─── Pitfall #21: get_current_user DB lookup on every request ──────────
+# The JWT payload should contain user_id (UUID) so get_current_user can
+# extract it without a DB round-trip. If the function does
+# "SELECT * FROM users WHERE wallet_address = $1" on every call, that's
+# one extra DB query per authenticated request.
+
+def check_get_current_user_no_db(py_files: List[str], result: AuditResult):
+    """
+    Pitfall #21: Detect get_current_user functions that do a DB SELECT
+    on every call instead of extracting user_id from JWT claims.
+    """
+    found_function = False
+    for fpath in py_files:
+        if fpath.endswith("audit_source.py"):
+            continue
+        text = read_file(fpath)
+        if "get_current_user" not in text:
+            continue
+        found_function = True
+        file_lines = lines(text)
+        in_func = False
+        func_start = 0
+        has_db_select = False
+        has_jwt_uid_extract = False
+        func_body_lines = []
+
+        for i, line in enumerate(file_lines, 1):
+            # Detect function definition
+            if re.search(r"def\s+get_current_user", line):
+                in_func = True
+                func_start = i
+                func_body_lines = []
+                has_db_select = False
+                has_jwt_uid_extract = False
+                continue
+            if in_func:
+                # End of function: next def/class at column 0
+                if line and not line[0].isspace() and (line.startswith("def ") or line.startswith("class ")):
+                    # Analyze the completed function
+                    body = "\n".join(func_body_lines)
+                    if has_db_select and not has_jwt_uid_extract:
+                        result.add(Finding(
+                            pitfall="#21",
+                            severity="minor",
+                            file=fpath,
+                            line=func_start,
+                            description=(
+                                "get_current_user does DB SELECT but does not "
+                                "extract user_id from JWT claims (sub/uid). "
+                                "This causes one extra DB round-trip per authenticated request."
+                            ),
+                            suggestion=(
+                                "Embed user_id in JWT claims at token creation time, "
+                                "then extract with jwt_payload.get('uid') or jwt_payload.get('user_id'). "
+                                "Keep a fallback DB lookup for old tokens lacking the claim."
+                            ),
+                        ))
+                    elif not has_db_select:
+                        result.add_pass(
+                            f"Pitfall #21: get_current_user in {fpath} — no DB SELECT found (likely extracts from JWT)"
+                        )
+                    else:
+                        result.add_pass(
+                            f"Pitfall #21: get_current_user in {fpath} — has both DB SELECT and JWT uid extraction (OK)"
+                        )
+                    in_func = False
+                    continue
+                func_body_lines.append(line)
+                if re.search(r"(SELECT|fetch|execute)\b", line, re.IGNORECASE):
+                    if re.search(r"(users|wallet_address|WHERE\s+\w+\s*=\s*\$)", line, re.IGNORECASE):
+                        has_db_select = True
+                if re.search(r"(uid|user_id|sub)\b", line) and re.search(r"(jwt|payload|claims|token)", line, re.IGNORECASE):
+                    has_jwt_uid_extract = True
+
+        # Handle function at end of file
+        if in_func:
+            body = "\n".join(func_body_lines)
+            if has_db_select and not has_jwt_uid_extract:
+                result.add(Finding(
+                    pitfall="#21",
+                    severity="minor",
+                    file=fpath,
+                    line=func_start,
+                    description=(
+                        "get_current_user does DB SELECT but does not "
+                        "extract user_id from JWT claims."
+                    ),
+                    suggestion=(
+                        "Embed user_id in JWT claims at token creation time."
+                    ),
+                ))
+            else:
+                result.add_pass(
+                    f"Pitfall #21: get_current_user in {fpath} — OK"
+                )
+
+    if not found_function:
+        result.add_pass("Pitfall #21: No get_current_user function found (check not applicable)")
+
+
+# ─── Pitfall #23: Phase isolation in monitor workers ───────────────────
+# When a monitor has multiple phases (e.g., Phase 4: fetch+update, Phase 5:
+# signal generation), Phase 5 must use a SEPARATE DB connection. If Phase 5
+# runs inside Phase 4's transaction and fails, the entire transaction rolls
+# back — but _last_tx_hashes was already updated in-memory, so the dropped
+# tx is never retried (silent data loss).
+
+def check_phase_isolation_monitor(py_files: List[str], result: AuditResult):
+    """
+    Pitfall #23: Detect monitor workers where signal/alert evaluation
+    runs inside the same DB transaction as the wallet UPDATE phase.
+    """
+    for fpath in py_files:
+        if fpath.endswith("audit_source.py"):
+            continue
+        text = read_file(fpath)
+        # Only check files that look like monitor workers
+        if "monitor" not in fpath.lower() and "phase" not in text.lower():
+            continue
+        if "async with" not in text or "acquire" not in text:
+            continue
+
+        file_lines = lines(text)
+        # Find phase boundaries and check for nested async with blocks
+        phase_pattern = re.compile(r"Phase\s+(\d+)", re.IGNORECASE)
+        async_with_pattern = re.compile(r"async\s+with\s+.*acquire")
+
+        phases_found = []
+        for i, line in enumerate(file_lines, 1):
+            m = phase_pattern.search(line)
+            if m:
+                phases_found.append((i, m.group(1)))
+
+        if len(phases_found) < 2:
+            # Check for signal/alert evaluation inside a transaction
+            has_signal_insert = "copy_trade_signals" in text or "signal" in text.lower()
+            has_wallet_update = "UPDATE" in text and "wallets" in text.lower()
+            has_separate_conn = text.count("async with") > 1
+
+            if has_signal_insert and has_wallet_update and not has_separate_conn:
+                result.add(Finding(
+                    pitfall="#23",
+                    severity="critical",
+                    file=fpath,
+                    line=1,
+                    description=(
+                        "Monitor has signal INSERT and wallet UPDATE but only one "
+                        "'async with acquire' block. If signal INSERT fails inside "
+                        "the UPDATE transaction, the entire transaction rolls back "
+                        "but _last_tx_hashes is already updated — silent data loss."
+                    ),
+                    suggestion=(
+                        "Use separate 'async with _pool.acquire() as conn' blocks for "
+                        "each phase. Phase N+1 must open a fresh connection after "
+                        "Phase N's transaction commits."
+                    ),
+                ))
+            else:
+                result.add_pass(
+                    f"Pitfall #23: {fpath} — phase isolation OK "
+                    f"(separate connections or no multi-phase pattern)"
+                )
+            continue
+
+        # Multiple phases found — check isolation
+        result.add_pass(
+            f"Pitfall #23: {fpath} — {len(phases_found)} phases found, "
+            f"manual review recommended for connection isolation"
+        )
+
+
+# ─── Pitfall #24: Balance-vs-event-amount conflation ───────────────────
+# A check function returning (balance_native, balance_usd, tx_hash, ...)
+# where downstream consumers use balance_native as the transaction amount.
+# A whale with 1000 ETH receiving 0.01 ETH dust would generate a signal
+# with confidence based on $3.2M balance instead of $32 tx.
+
+def check_balance_vs_event_amount(py_files: List[str], result: AuditResult):
+    """
+    Pitfall #24: Detect check functions that return balance_native
+    without a separate tx_amount_native field.
+    """
+    for fpath in py_files:
+        if fpath.endswith("audit_source.py"):
+            continue
+        text = read_file(fpath)
+        if "balance_native" not in text:
+            continue
+
+        file_lines = lines(text)
+        # Look for functions that return tuples containing balance_native
+        # and check if tx_amount_native is also present
+        for i, line in enumerate(file_lines, 1):
+            if "balance_native" in line and "return" in line:
+                # Check surrounding context (5 lines) for tx_amount_native
+                context_start = max(0, i - 5)
+                context_end = min(len(file_lines), i + 5)
+                context = "\n".join(file_lines[context_start:context_end])
+
+                if "tx_amount_native" not in context and "event_amount" not in context:
+                    # Check if this is a signal-related function
+                    if "signal" in text.lower() or "check" in text.lower():
+                        result.add(Finding(
+                            pitfall="#24",
+                            severity="minor",
+                            file=fpath,
+                            line=i,
+                            description=(
+                                f"Line {i}: return statement includes balance_native "
+                                f"but no tx_amount_native. Downstream consumers may "
+                                f"conflate wallet balance with transaction amount."
+                            ),
+                            suggestion=(
+                                "Return both balance_native and tx_amount_native as "
+                                "separate elements. Name event-level amounts distinctly "
+                                "from aggregate-state amounts."
+                            ),
+                        ))
+                        break  # One finding per file is enough
+
+        # If we didn't flag it, it's OK
+        if not any(f.file == fpath for f in result.findings if f.pitfall == "#24"):
+            result.add_pass(f"Pitfall #24: {fpath} — balance/amount fields properly distinguished")
+
+
+# ─── Pitfall #7: DB connection held across external HTTP calls ─────────
+# When an endpoint fetches data from external APIs while holding a DB
+# connection from the pool, the connection sits idle during slow I/O.
+# For endpoints looping over N items, this means N connections held.
+
+def check_db_conn_held_across_http(py_files: List[str], result: AuditResult):
+    """
+    Pitfall #7: Detect patterns where a DB connection is held while
+    making external HTTP calls (fetch-then-store loops).
+    """
+    for fpath in py_files:
+        if fpath.endswith("audit_source.py"):
+            continue
+        text = read_file(fpath)
+        if "async with" not in text:
+            continue
+
+        file_lines = lines(text)
+        in_async_with = False
+        async_with_line = 0
+        async_with_indent = 0
+        has_external_http = False
+        has_db_write = False
+        conn_var = ""
+
+        for i, line in enumerate(file_lines, 1):
+            # Detect async with acquire_db() or pool.acquire()
+            if not in_async_with:
+                m = re.search(r"async\s+with\s+.*(?:acquire|_pool)\s*(?:as\s+(\w+))?", line)
+                if m:
+                    in_async_with = True
+                    async_with_line = i
+                    async_with_indent = len(line) - len(line.lstrip())
+                    conn_var = m.group(1) or "conn"
+                    has_external_http = False
+                    has_db_write = False
+                continue
+
+            # Check if we're still inside the async with block
+            # A line at the same or lesser indentation than the async with ends the block
+            _indent = int(async_with_indent)
+            if line.strip() and not line.startswith(" " * (_indent + 1)):
+                # Block ended — analyze
+                if has_db_write and has_external_http:
+                    result.add(Finding(
+                        pitfall="#7",
+                        severity="minor",
+                        file=fpath,
+                        line=async_with_line,
+                        description=(
+                            f"DB connection held across external HTTP calls "
+                            f"(async with at line {async_with_line}). "
+                            f"Connection sits idle during slow I/O."
+                        ),
+                        suggestion=(
+                            "Separate into phases: (1) fetch all external data first "
+                            "with no DB held, (2) acquire connection once for all writes, "
+                            "(3) release."
+                        ),
+                    ))
+                else:
+                    result.add_pass(
+                        f"Pitfall #7: {fpath} line {async_with_line} — "
+                        f"no HTTP calls while holding DB conn"
+                    )
+                in_async_with = False
+                continue
+
+            # Inside the block — check for HTTP calls and DB writes
+            # Match actual HTTP client method calls (not imports or dict.get())
+            # Pattern: variable.get/post/put/delete/patch(  where variable looks like an HTTP client
+            if re.search(r"(await\s+)?(client|session|http_client|resp|response|cl)\.(get|post|put|delete|patch)\(", line):
+                has_external_http = True
+            if re.search(r"(INSERT|UPDATE|DELETE|execute|fetch)\b", line, re.IGNORECASE):
+                has_db_write = True
+
+        # Handle block at end of file
+        if in_async_with and has_db_write and has_external_http:
+            result.add(Finding(
+                pitfall="#7",
+                severity="minor",
+                file=fpath,
+                line=async_with_line,
+                description=(
+                    f"DB connection held across external HTTP calls "
+                    f"(async with at line {async_with_line})."
+                ),
+                suggestion="Separate fetch and store phases.",
+            ))
+
+
+# ─── Pitfall #14: $$ in JS template literals ──────────────────────────
+def check_double_dollar_in_template_literals(jsx_files: List[str], result: AuditResult):
+    """
+    Pitfall #14: Detect $$ in JavaScript template literals where expr already
+    returns a currency-prefixed string. $$ is ONLY safe when expr returns a
+    plain number (e.g., .toLocaleString(), .toFixed()). Flag when expr is a
+    simple variable or function call that may already include currency formatting.
+    """
+    if not jsx_files:
+        result.add_pass("Pitfall #14: No JS/JSX files to scan")
+        return
+
+    dd_pattern = re.compile(r"`[^`]*\$\$\{([^}]+)\}[^`]*`")
+    # Patterns that clearly return unformatted numbers (safe with $$)
+    safe_patterns = [
+        r"\.toLocaleString\(",
+        r"\.toFixed\(",
+        r"\.toString\(",
+        r"Math\.",
+        r"parseInt\(",
+        r"parseFloat\(",
+        r"Number\(",
+        r"\|\s*0",  # fallback to 0
+        r"\?\s*0",  # fallback to 0
+    ]
+    found_any = False
+    for fpath in jsx_files:
+        text = read_file(fpath)
+        if "`" not in text:
+            continue
+        file_lines = lines(text)
+        for i, line in enumerate(file_lines, 1):
+            m = dd_pattern.search(line)
+            if m:
+                expr = m.group(1)
+                # Skip if the expression clearly returns a plain number
+                if any(re.search(sp, expr) for sp in safe_patterns):
+                    continue
+                # Skip HK$ patterns (Hong Kong dollar prefix is intentional)
+                if "HK$" in line[:m.start()]:
+                    continue
+                result.add(Finding(
+                    pitfall="#14",
+                    severity="critical",
+                    file=fpath,
+                    line=i,
+                    description=(
+                        f"$${{'{expr}'}} in template literal — if '{expr}' already "
+                        f"returns a currency-prefixed string, the result will show "
+                        f"a double dollar sign (e.g., '$$50,000')."
+                    ),
+                    suggestion=(
+                        "If the formatter already adds a currency symbol, use ${expr} "
+                        "instead of $${expr}. If expr returns a plain number, this is fine."
+                    ),
+                ))
+                found_any = True
+
+    if not found_any:
+        result.add_pass("Pitfall #14: No $$ in template literals found")
+
+
+# ─── Pitfall #11: Grid layout breakage in JSX ─────────────────────────
+def check_grid_layout_breakage(jsx_files: List[str], result: AuditResult):
+    """
+    Pitfall #11: Detect CSS grid with N columns that has N+1 children,
+    which causes the extra child to wrap to a new row as a single column.
+
+    Improved: Only counts elements that are direct children of the grid
+    container by checking indentation/bracket depth, not nested elements.
+    """
+    if not jsx_files:
+        result.add_pass("Pitfall #11: No JS/JSX files to scan")
+        return
+
+    grid_pattern = re.compile(r"gridTemplateColumns\s*:\s*['\"](\d+)fr\s+(\d+)fr['\"]")
+    has_issue = False
+    for fpath in jsx_files:
+        text = read_file(fpath)
+        if "gridTemplateColumns" not in text:
+            continue
+        file_lines = lines(text)
+        for i, line in enumerate(file_lines, 1):
+            m = grid_pattern.search(line)
+            if m:
+                col_count = 2
+                # Determine base indentation from the grid container line
+                base_indent = len(line) - len(line.lstrip())
+                child_count = 0
+                # Count direct children: lines with slightly more indent than the grid line
+                # that contain opening JSX tags — stop when we exit the container
+                for j in range(i + 1, min(i + 30, len(file_lines))):
+                    child_line = file_lines[j]
+                    if not child_line.strip() or child_line.strip().startswith("//"):
+                        continue
+                    child_indent = len(child_line) - len(child_line.lstrip())
+                    # If we've returned to the grid container's indent level or less, the container closed
+                    if child_indent <= base_indent:
+                        break
+                    # Direct children are roughly one indent level deeper than the grid container
+                    if child_indent <= base_indent + 12:  # allow up to ~3 levels of indentation (12 spaces)
+                        # Only count divs as grid children (standard JSX grid pattern)
+                        if re.search(r"<div[\s>]", child_line):
+                            if not re.search(r"</div>", child_line):
+                                child_count += 1
+
+                if child_count > col_count:
+                    result.add(Finding(
+                        pitfall="#11",
+                        severity="minor",
+                        file=fpath,
+                        line=i,
+                        description=(
+                            f"Grid with {col_count} columns appears to have ~{child_count} "
+                            f"direct child elements. Extra children may wrap to new rows."
+                        ),
+                        suggestion=(
+                            "Either move the new card outside the grid wrapper, or change "
+                            "gridTemplateColumns to accommodate the new column count."
+                        ),
+                    ))
+                    has_issue = True
+
+    if not has_issue:
+        result.add_pass("Pitfall #11: Grid layout check completed")
+
+
+# ─── Pitfall #15: Dead variable cascade ───────────────────────────────
+def check_dead_variable_cascade(py_files: List[str], result: AuditResult):
+    """
+    Pitfall #15: Detect variables that are initialized to 0 and incremented
+    but never used in any return value or output — dead code.
+    """
+    for fpath in py_files:
+        if fpath.endswith("audit_source.py"):
+            continue
+        text = read_file(fpath)
+        file_lines = lines(text)
+
+        init_pattern = re.compile(r"^(\s*)(\w+)\s*=\s*0\.?\d*\s*(?:#.*)?$")
+        incr_pattern = re.compile(r"^\s*(\w+)\s*\+=\s*\d+")
+
+        inits = {}
+        incrs = {}
+
+        for i, line in enumerate(file_lines, 1):
+            m = init_pattern.match(line)
+            if m:
+                var = m.group(2)
+                # Skip common loop counters and indices
+                if var in ("i", "j", "k", "n", "idx", "_"):
+                    continue
+                inits[var] = (i, len(m.group(1)))
+            m = incr_pattern.match(line)
+            if m:
+                var = m.group(1)
+                if var in ("i", "j", "k", "n", "idx", "_"):
+                    continue
+                incrs.setdefault(var, []).append(i)
+
+        for var in set(inits.keys()) & set(incrs.keys()):
+            return_uses = []
+            other_uses = []
+            for i, line in enumerate(file_lines, 1):
+                if i == inits[var][0]:
+                    continue
+                if re.search(r"\b" + re.escape(var) + r"\b", line):
+                    if "return" in line:
+                        return_uses.append(i)
+                    elif "+=" not in line:
+                        other_uses.append(i)
+
+            if not return_uses and not other_uses:
+                result.add(Finding(
+                    pitfall="#15",
+                    severity="minor",
+                    file=fpath,
+                    line=inits[var][0],
+                    description=(
+                        f"Variable '{var}' is initialized to 0 at line {inits[var][0]} "
+                        f"and incremented at lines {incrs[var]} but never used in any "
+                        f"return value or output. Likely dead code from a removed return key."
+                    ),
+                    suggestion=(
+                        f"Remove the dead initializer ({var} = 0) and all increments "
+                        f"({var} += N) since the variable serves no purpose."
+                    ),
+                ))
+
+    result.add_pass("Pitfall #15: Dead variable cascade check completed")
+
+
+# ─── Pitfall #22: Pyright built-in generics ───────────────────────────
+def check_pyright_builtin_generics(py_files: List[str], result: AuditResult):
+    """
+    Pitfall #22: Detect use of typing.Dict/List/Optional-style generics
+    without corresponding imports, which can cause Pyright errors.
+    """
+    for fpath in py_files:
+        if fpath.endswith("audit_source.py"):
+            continue
+        text = read_file(fpath)
+        file_lines = lines(text)
+
+        typing_generic_pattern = re.compile(r":\s*(Dict|List|Optional|Tuple|Set|FrozenSet|Union)\s*\[")
+        has_typing_import = bool(re.search(r"from typing import|import typing", text))
+        has_future_annotations = "from __future__ import annotations" in text
+
+        issues = []
+        for i, line in enumerate(file_lines, 1):
+            if typing_generic_pattern.search(line):
+                issues.append(i)
+
+        if issues and not has_typing_import and not has_future_annotations:
+            result.add(Finding(
+                pitfall="#22",
+                severity="minor",
+                file=fpath,
+                line=issues[0],
+                description=(
+                    f"Uses typing.Dict/List/Optional-style generics at lines {issues} "
+                    f"but no 'from typing import' found. This can cause Pyright "
+                    f"reportUndefinedVariable errors."
+                ),
+                suggestion=(
+                    "Add 'from typing import Dict, List, Optional' at module level, "
+                    "or use built-in generics (dict[str, float]) with "
+                    "'from __future__ import annotations'."
+                ),
+            ))
+
+    result.add_pass("Pitfall #22: Pyright built-in generics check completed")
+
+
+# ─── Pitfall #3: CoinGecko simple/price response shape ────────────────
+def check_coingecko_response_shape(py_files: List[str], result: AuditResult):
+    """
+    Pitfall #3: Detect code that assumes CoinGecko simple/price returns
+    a top-level currency key instead of per-coin objects.
+    """
+    for fpath in py_files:
+        if fpath.endswith("audit_source.py"):
+            continue
+        text = read_file(fpath)
+        if "simple/price" not in text and "coingecko" not in text.lower():
+            continue
+
+        file_lines = lines(text)
+        for i, line in enumerate(file_lines, 1):
+            if re.search(r"data\.get\(['\"](usd|hkd|btc|eur)['\"]", line) or \
+               re.search(r"data\[['\"](usd|hkd|btc|eur)['\"]\]", line):
+                context_start = max(0, i - 3)
+                context_end = min(len(file_lines), i + 3)
+                context = "\n".join(file_lines[context_start:context_end])
+
+                if "simple/price" in context or "coingecko" in context.lower():
+                    if not re.search(r"data\[.*\]\[['\"](usd|hkd|btc)", context):
+                        result.add(Finding(
+                            pitfall="#3",
+                            severity="critical",
+                            file=fpath,
+                            line=i,
+                            description=(
+                                "CoinGecko simple/price returns {coin_id: {usd: X, hkd: Y}}, "
+                                "NOT {usd: X, hkd: Y}. Using data.get('usd') always returns {}."
+                            ),
+                            suggestion=(
+                                "Access per-coin data first: data[coin_id]['usd']. "
+                                "For cross-rates, compute from a common base: eth_hkd / eth_usd."
+                            ),
+                        ))
+
+    result.add_pass("Pitfall #3: CoinGecko response shape check completed")
+
+
 def run_audit(base_path: str) -> AuditResult:
     result = AuditResult()
 
@@ -1682,6 +2273,14 @@ def run_audit(base_path: str) -> AuditResult:
         for f in files:
             if f.endswith((".jsx", ".tsx", ".js", ".ts")):
                 jsx_files.append(os.path.join(root, f))
+    # Also scan sibling frontend/ directory if it exists
+    frontend_path = os.path.normpath(os.path.join(base_path, "..", "frontend", "src"))
+    if os.path.isdir(frontend_path):
+        for root, dirs, files in os.walk(frontend_path):
+            dirs[:] = [d for d in dirs if d not in {"__pycache__", ".git", "node_modules"}]
+            for f in files:
+                if f.endswith((".jsx", ".tsx", ".js", ".ts")):
+                    jsx_files.append(os.path.join(root, f))
 
     print(f"Scanning {len(py_files)} Python files, {len(sql_files)} SQL files, {len(jsx_files)} JS/JSX files...")
 
@@ -1705,6 +2304,15 @@ def run_audit(base_path: str) -> AuditResult:
     check_frontend_backend_field_contract(py_files, jsx_files, sql_files, result)
     check_approx_price_not_used_for_balance(py_files, result)
     check_on_conflict_exact_column_match(py_files, sql_files, result)
+    check_get_current_user_no_db(py_files, result)
+    check_phase_isolation_monitor(py_files, result)
+    check_balance_vs_event_amount(py_files, result)
+    check_db_conn_held_across_http(py_files, result)
+    check_double_dollar_in_template_literals(jsx_files, result)
+    check_grid_layout_breakage(jsx_files, result)
+    check_dead_variable_cascade(py_files, result)
+    check_pyright_builtin_generics(py_files, result)
+    check_coingecko_response_shape(py_files, result)
 
     return result
 

@@ -721,7 +721,7 @@ async def get_dashboard(user: dict = Depends(get_current_user)):
     # ── Fetch live prices for currency conversion ────────────────────
     _prices = await _fetch_dashboard_prices()
     _usd_hkd = _prices.get("USDHKD", 7.8)       # fallback: ~peg
-    _usd_btc = _prices.get("USDBTC", 1.0 / 62000.0)  # fallback
+    _usd_btc = _prices.get("USDBTC", 1.0 / 105000.0)  # fallback (BTC ~$105K)
 
     wallet_meta: List[dict] = []
     fresh_count = 0
@@ -1028,17 +1028,17 @@ async def refresh_wallet(
         if _price_data.get("usd", 0) > 0:
             _token_price_usd = _price_data["usd"]
             _usd_hkd = _price_data.get("hkd", 0) / _price_data["usd"] if _price_data.get("hkd") else 7.8
-            _usd_btc = _price_data.get("btc", 0) / _price_data["usd"] if _price_data.get("btc") else 1.0 / 62000.0
+            _usd_btc = _price_data.get("btc", 0) / _price_data["usd"] if _price_data.get("btc") else 1.0 / 105000.0
         else:
             # Fallback to dashboard cache for cross-rates
             _dash_prices = await _fetch_dashboard_prices()
             _usd_hkd = _dash_prices.get("USDHKD", 7.8)
-            _usd_btc = _dash_prices.get("USDBTC", 1.0 / 62000.0)
+            _usd_btc = _dash_prices.get("USDBTC", 1.0 / 105000.0)  # fallback: BTC ~$105K
     except Exception:
         # Fallback to dashboard cache on any error
         _dash_prices = await _fetch_dashboard_prices()
         _usd_hkd = _dash_prices.get("USDHKD", 7.8)
-        _usd_btc = _dash_prices.get("USDBTC", 1.0 / 62000.0)
+        _usd_btc = _dash_prices.get("USDBTC", 1.0 / 105000.0)  # fallback: BTC ~$105K
 
     balance_usd = balance_native * _token_price_usd
     balance_hkd = round(balance_usd * _usd_hkd, 2)

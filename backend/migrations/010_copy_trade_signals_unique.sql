@@ -1,6 +1,6 @@
 -- ChainWatch Migration 010
 -- Fix: Add unique constraint on copy_trade_signals so ON CONFLICT DO NOTHING works.
--- The INSERT in poll_wallets.py line 151 uses ON CONFLICT DO NOTHING but no unique
+-- The INSERT in monitor.py uses ON CONFLICT DO NOTHING but no unique
 -- constraint exists on the table, so duplicates are silently inserted every poll cycle.
 -- Natural dedup key: (wallet_id, token_symbol, action, amount_usd) — same signal
 -- shouldn't be recorded twice with identical values.

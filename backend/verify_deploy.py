@@ -75,7 +75,8 @@ AUTH_REQUIRED_ENDPOINTS = [
 # Columns that MUST exist in the schema (from migrations 001-007)
 REQUIRED_COLUMNS = {
     "wallets": [
-        "balance_native", "balance_usd", "last_balance_update",
+        "balance_native", "balance_usd", "balance_hkd", "balance_btc",
+        "last_balance_update",
         "whale_score", "score_activity", "score_reliability", "score_weight",
         "score_recency", "score_diversity", "score_signals_used",
         "score_calculated_at", "score_is_coldstart",
@@ -85,7 +86,7 @@ REQUIRED_COLUMNS = {
         "explanation", "explanation_stale", "score_at_generation",
     ],
     "alerts": [
-        "last_fired_at", "cooldown_seconds",
+        "last_fired_at",
     ],
     "users": [
         "alpaca_api_key_enc", "alpaca_api_key_iv",
@@ -99,6 +100,7 @@ REQUIRED_UNIQUE_CONSTRAINTS = [
     ("uq_transactions_tx_hash_chain", "transactions"),
     ("uq_users_wallet_address", "users"),
     ("uq_whale_suggestions_chain_address", "whale_suggestions"),
+    ("uq_copy_trade_signals_dedup", "copy_trade_signals"),
 ]
 
 

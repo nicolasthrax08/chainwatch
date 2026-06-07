@@ -11,7 +11,14 @@ from typing import Optional, Dict, Tuple
 
 logger = logging.getLogger("chainwatch.signals")
 
-MIN_SIGNAL_USD = 1000.0  # minimum tx value to generate a signal
+# Chain-specific minimum tx value to generate a signal (Pitfall #24: event-level amounts).
+# BTC whales moving <$10K are likely dust; ETH and SOL have proportionally lower floors.
+MIN_SIGNAL_USD_BY_CHAIN: dict = {
+    "btc": 10000.0,
+    "eth": 5000.0,
+    "sol": 2000.0,
+}
+MIN_SIGNAL_USD_DEFAULT = 5000.0  # fallback for any future chain
 DEDUP_INTERVAL = "5 minutes"
 
 # Finding 5: In-memory dedup cache with TTL to prevent signal dedup race condition
@@ -206,7 +213,9 @@ async def evaluate_for_signal(
         return None
 
     amount_usd = tx_amount_native * price_usd
-    if amount_usd < MIN_SIGNAL_USD:
+    # Use chain-specific minimum threshold to filter dust txns from whales
+    _min_usd = MIN_SIGNAL_USD_BY_CHAIN.get(chain.lower(), MIN_SIGNAL_USD_DEFAULT)
+    if amount_usd < _min_usd:
         return None
 
     # Normalize token symbol

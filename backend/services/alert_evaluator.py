@@ -289,7 +289,7 @@ async def evaluate_alerts(
                 SELECT
                     unnest($1::uuid[]), unnest($2::uuid[]), unnest($3::text[]),
                     unnest($4::numeric[]), unnest($5::jsonb[]), unnest($6::text[])
-                ON CONFLICT DO NOTHING
+                ON CONFLICT (alert_id, trigger_value) DO NOTHING
                 """,
                 fa_alert_ids, fa_user_ids, fa_rule_types,
                 fa_trigger_values, fa_details, fa_messages,
@@ -305,7 +305,7 @@ async def evaluate_alerts(
                         INSERT INTO fired_alerts
                             (alert_id, user_id, rule_type, trigger_value, details, message)
                         VALUES ($1, $2, $3, $4, $5, $6)
-                        ON CONFLICT DO NOTHING
+                        ON CONFLICT (alert_id, trigger_value) DO NOTHING
                         """,
                         f["alert_id"], f["user_id"], f["rule_type"],
                         f["trigger_value"], "{}", f.get("message", ""),
@@ -318,7 +318,7 @@ async def evaluate_alerts(
                             INSERT INTO fired_alerts
                                 (alert_id, user_id, rule_type, trigger_value, details)
                             VALUES ($1, $2, $3, $4, $5)
-                            ON CONFLICT DO NOTHING
+                            ON CONFLICT (alert_id, trigger_value) DO NOTHING
                             """,
                             f["alert_id"], f["user_id"], f["rule_type"],
                             f["trigger_value"], "{}",
