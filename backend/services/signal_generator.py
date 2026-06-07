@@ -313,6 +313,7 @@ async def evaluate_for_signal(
         signal_dict["explanation"] = explanation
         signal_dict["explanation_stale"] = False
         signal_dict["confidence_final"] = c_final
+        signal_dict["score_at_generation"] = whale_score
 
         logger.info(
             "Signal generated: wallet=%s token=%s amount_usd=%s confidence=%s "

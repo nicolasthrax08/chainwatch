@@ -193,10 +193,11 @@ WS_MESSAGE_SHAPES: Dict[str, Dict[str, Set[str]]] = {
     # Action: "created"
     "signal": {
         "created": {
-            "id", "wallet_id", "wallet_address", "chain",
+            "id", "wallet_id", "wallet_address", "wallet_label", "chain",
             "token_symbol", "action", "amount_usd",
-            "confidence_score", "status", "created_at",
-            "whale_score", "confidence_final",
+            "confidence_score", "confidence_final",
+            "whale_score", "score_at_generation",
+            "status", "created_at",
             "explanation", "explanation_stale",
         },
     },
