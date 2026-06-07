@@ -2512,6 +2512,41 @@ def check_copy_trade_signals_performance_indexes(
         ))
 
 
+def check_concurrent_price_fetch(py_files: List[str], result: AuditResult):
+    """
+    Performance: Verify that _ensure_prices_fetched() fetches both CoinGecko
+    endpoints concurrently (asyncio.gather) instead of sequentially.
+    Sequential fetches double the lock hold time and price refresh latency.
+    """
+    for fpath in py_files:
+        text = read_file(fpath)
+        if "_ensure_prices_fetched" not in text:
+            continue
+        # Check that asyncio.gather is used for the two CG requests
+        if "asyncio.gather(" in text and "cg_client.get" in text:
+            result.add_pass(
+                "Performance: _ensure_prices_fetches CoinGecko calls concurrently (asyncio.gather)"
+            )
+        else:
+            result.add(Finding(
+                pitfall="performance",
+                severity="minor",
+                file=fpath,
+                line=1,
+                description=(
+                    "_ensure_prices_fetched() makes sequential CoinGecko API calls. "
+                    "Use asyncio.gather() to fetch both endpoints concurrently, "
+                    "cutting price refresh latency and lock hold time in half."
+                ),
+                suggestion=(
+                    "Replace sequential 'await cg_client.get(...)' calls with "
+                    "'await asyncio.gather(cg_client.get(...), cg_client.get(...))'"
+                ),
+            ))
+        return  # Only check the first file that contains the function
+    result.add_pass("Performance: _ensure_prices_fetched not found (no check needed)")
+
+
 def run_audit(base_path: str) -> AuditResult:
     result = AuditResult()
 
@@ -2567,6 +2602,7 @@ def run_audit(base_path: str) -> AuditResult:
     check_stale_price_cache_drift(py_files, result)
     check_whale_score_in_dashboard(py_files, jsx_files, result)
     check_copy_trade_signals_performance_indexes(sql_files, result)
+    check_concurrent_price_fetch(py_files, result)
 
     return result
 

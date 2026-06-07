@@ -320,6 +320,28 @@ async def _poll_all_wallets_inner() -> None:
         # Collect distinct user_ids from the changed set
         changed_user_ids = list({uid for _, _, _, _, _, uid, _ in changed_wallets})
 
+        # ── Pre-compute global median once per cycle (O(N) → O(1)) ──────
+        # The whale_scorer global_median subquery runs once per wallet by default.
+        # Pre-computing it here and passing it as a parameter eliminates N subqueries.
+        _global_median_30d = 0.0
+        try:
+            async with _pool.acquire() as conn:
+                _gm_row = await conn.fetchrow(
+                    """
+                    SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY cts.amount_usd)
+                        AS global_median_30d
+                    FROM copy_trade_signals cts
+                    JOIN wallets w ON w.id = cts.wallet_id
+                    WHERE w.is_whale = TRUE
+                      AND cts.created_at >= NOW() - INTERVAL '30 days'
+                    """
+                )
+                if _gm_row and _gm_row["global_median_30d"] is not None:
+                    _global_median_30d = float(_gm_row["global_median_30d"])
+        except Exception as e:
+            logger.warning("Failed to pre-compute global_median_30d: %s", e)
+            _global_median_30d = 0.0  # whale_scorer will fall back to per-wallet subquery
+
         # 6a: Alert evaluation
         if changed_user_ids:
             try:
@@ -393,7 +415,10 @@ async def _poll_all_wallets_inner() -> None:
                     }
                     if is_whale:
                         try:
-                            score_data = await score_whale_wallet(conn, wid)
+                            score_data = await score_whale_wallet(
+                                conn, wid,
+                                global_median_30d=_global_median_30d,
+                            )
                         except Exception as score_err:
                             logger.warning(
                                 "Whale scoring failed for %s: %s", wid, score_err
@@ -552,28 +577,36 @@ async def _check_wallet_balance_and_txs(
     async with _state_lock:
         old_balance = _last_balances.get(wid, None)
 
-    # ── Fetch live balance via shared blockchain client ───────────────
+    # ── Fetch live balance and latest tx concurrently ──────────────────
+    # Both calls are independent (different APIs/clients), so running them
+    # in parallel cuts per-wallet latency roughly in half.
     client = _clients.get(chain)
     if client is None:
         raise RuntimeError(f"No blockchain client for chain '{chain}'")
 
-    new_balance_native = 0.0
-    symbol = chain.upper()
+    from services.tx_fetcher import fetch_transactions_for_wallet
 
-    if chain == "eth":
-        bal = await client.get_eth_balance(addr)
-        new_balance_native = bal.get("balance_eth", 0)
-        symbol = "ETH"
-    elif chain == "sol":
-        bal = await client.get_balance(addr)
-        new_balance_native = bal.get("balance_sol", 0)
-        symbol = "SOL"
-    elif chain == "btc":
-        bal = await client.get_balance(addr)
-        new_balance_native = bal.get("balance_btc", 0)
-        symbol = "BTC"
-    else:
-        raise ValueError(f"Unsupported chain: {chain}")
+    async def _fetch_balance():
+        if chain == "eth":
+            bal = await client.get_eth_balance(addr)
+            return bal.get("balance_eth", 0), "ETH"
+        elif chain == "sol":
+            bal = await client.get_balance(addr)
+            return bal.get("balance_sol", 0), "SOL"
+        elif chain == "btc":
+            bal = await client.get_balance(addr)
+            return bal.get("balance_btc", 0), "BTC"
+        else:
+            raise ValueError(f"Unsupported chain: {chain}")
+
+    # Run balance fetch and tx fetch concurrently
+    balance_task = asyncio.ensure_future(_fetch_balance())
+    tx_task = asyncio.ensure_future(
+        fetch_transactions_for_wallet(addr, chain, limit=3)
+    )
+    (new_balance_native, symbol), txs = await asyncio.gather(
+        balance_task, tx_task
+    )
 
     # ── Convert to USD via our own price cache (no circular import) ──
     await _ensure_prices_fetched()
@@ -586,9 +619,6 @@ async def _check_wallet_balance_and_txs(
         or abs(new_balance_native - old_balance) > 1e-10
     )
 
-    # ── Fetch latest tx ──────────────────────────────────────────────
-    from services.tx_fetcher import fetch_transactions_for_wallet
-    txs = await fetch_transactions_for_wallet(addr, chain, limit=3)
     latest_tx = txs[0] if txs else None
     latest_tx_hash = latest_tx["tx_hash"] if latest_tx else None
 
@@ -642,31 +672,36 @@ async def _ensure_prices_fetched() -> None:
         try:
             from services.tx_fetcher import _get_client as _get_shared_client
             cg_client = await _get_shared_client()
-            resp = await cg_client.get(
-                "https://api.coingecko.com/api/v3/simple/price",
-                params={
-                    "ids": "ethereum",
-                    "vs_currencies": "usd,hkd,btc",
-                },
+
+            # Fetch both price endpoints concurrently to reduce lock hold time
+            # and cut price refresh latency roughly in half.
+            resp, resp2 = await asyncio.gather(
+                cg_client.get(
+                    "https://api.coingecko.com/api/v3/simple/price",
+                    params={
+                        "ids": "ethereum",
+                        "vs_currencies": "usd,hkd,btc",
+                    },
+                ),
+                cg_client.get(
+                    "https://api.coingecko.com/api/v3/simple/price",
+                    params={
+                        "ids": "solana,bitcoin",
+                        "vs_currencies": "usd",
+                    },
+                ),
             )
             resp.raise_for_status()
             data = resp.json()
+
+            resp2.raise_for_status()
+            data2 = resp2.json()
 
             eth = data.get("ethereum", {})
             eth_usd = eth.get("usd", 0)
             eth_hkd = eth.get("hkd", 0)
             eth_btc = eth.get("btc", 0)
 
-            # Also fetch SOL and BTC in USD for their price cache entries
-            resp2 = await cg_client.get(
-                "https://api.coingecko.com/api/v3/simple/price",
-                params={
-                    "ids": "solana,bitcoin",
-                    "vs_currencies": "usd",
-                },
-            )
-            resp2.raise_for_status()
-            data2 = resp2.json()
             sol_usd = data2.get("solana", {}).get("usd", 0)
             btc_usd = data2.get("bitcoin", {}).get("usd", 0)
 
