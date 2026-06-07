@@ -352,12 +352,20 @@ def check_try_except_imports(py_files: List[str], result: AuditResult):
         # Find try blocks with imports
         try_import_pattern = re.compile(
             r"try:\s*\n((?:\s+from\s+\S+\s+import\s+\S+|\s+import\s+\S+)+)"
-            r"\s*except[^\n]*:\s*\n\s+([^\n]+)",
+            r"\s*except[^\n]*:\s*\n",
             re.MULTILINE,
         )
         for m in try_import_pattern.finditer(text):
             imports_block = m.group(1)
-            except_block = m.group(2)
+            # Extract the full except block (all indented lines after the except header)
+            block_start = m.end()
+            lines_after = text[block_start:].split("\n")
+            except_block_lines = []
+            for line in lines_after:
+                if line and not line[0].isspace():
+                    break
+                except_block_lines.append(line)
+            except_block = "\n".join(except_block_lines)
             # Skip if except block raises, sys.exit, or assigns fallback (safe patterns:
             # if import fails, these prevent later code from running with unbound name)
             if re.search(r"\braise\b", except_block):
@@ -1502,6 +1510,51 @@ def check_frontend_backend_field_contract(py_files: List[str], jsx_files: List[s
 
 # ─── Main ────────────────────────────────────────────────────────────
 
+def check_approx_price_not_used_for_balance(py_files: List[str], result: AuditResult):
+    """
+    Check #28: Detect _APPROX_PRICE_USD used for actual balance conversion
+    (not just as a fallback default). Endpoints that convert native balances
+    to USD should use live CoinGecko prices, not hardcoded approximate prices.
+    """
+    import re
+    # Pattern: _APPROX_PRICE_USD.get(...) used directly in multiplication
+    # (not in a fallback/initialization context)
+    bad_pattern = re.compile(
+        r'balance_usd\s*=\s*\w+\s*\*\s*_APPROX_PRICE_USD'
+    )
+    # Pattern: _APPROX_PRICE_USD used in a fallback context (OK)
+    fallback_pattern = re.compile(
+        r'fallback|_APPROX_PRICE_USD\.get\(\w+,\s*[\d.]+\)|default'
+    )
+
+    for fpath in py_files:
+        text = read_file(fpath)
+        lines = text.splitlines()
+        for i, line in enumerate(lines, 1):
+            if '_APPROX_PRICE_USD' in line and bad_pattern.search(line):
+                # Check if this is in a fallback context
+                context_start = max(0, i - 3)
+                context_end = min(len(lines), i + 2)
+                context = '\n'.join(lines[context_start:context_end])
+                if not fallback_pattern.search(context):
+                    result.add(Finding(
+                        pitfall="Pitfall #28",
+                        severity="minor",
+                        file=fpath,
+                        line=i,
+                        description=(
+                            f"_APPROX_PRICE_USD used for balance conversion: {line.strip()}"
+                        ),
+                        suggestion=(
+                            "Use live CoinGecko price for balance conversion. "
+                            "_APPROX_PRICE_USD should only be used as a fallback default."
+                        ),
+                    ))
+                    return  # One finding is enough
+
+    result.add_pass("Pitfall #28: _APPROX_PRICE_USD not used for direct balance conversion")
+
+
 def run_audit(base_path: str) -> AuditResult:
     result = AuditResult()
 
@@ -1534,6 +1587,7 @@ def run_audit(base_path: str) -> AuditResult:
     check_parameter_renumbering(py_files, result)
     check_cron_secret_fail_closed(py_files, result)
     check_frontend_backend_field_contract(py_files, jsx_files, sql_files, result)
+    check_approx_price_not_used_for_balance(py_files, result)
 
     return result
 

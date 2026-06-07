@@ -90,7 +90,10 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
             },
         },
     ),
-    # GET /api/wallets — returns wallet objects (same shape as wallet_meta)
+    # GET /api/wallets — returns wallet objects
+    # Fields match main.py list_wallets() response dict (lines ~847-864)
+    # Note: is_fresh_wallet, risk_label, balance_native are only in the
+    # dashboard wallet_meta shape, not in the list_wallets response.
     EndpointResponse(
         name="wallets",
         method="GET",
@@ -99,8 +102,7 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
         nested={
             "wallet": {
                 "id", "address", "chain", "label", "is_whale", "is_mine",
-                "is_fresh_wallet", "risk_label",
-                "balance_usd", "balance_hkd", "balance_btc", "balance_native",
+                "balance_usd", "balance_hkd", "balance_btc",
                 "last_balance_update", "created_at",
             },
         },
@@ -124,6 +126,7 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
         },
     ),
     # GET /api/alerts — returns alert rule objects
+    # Fields match main.py list_alerts() response dict (lines ~1224-1234)
     EndpointResponse(
         name="alerts",
         method="GET",
@@ -131,12 +134,13 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
         fields={"alerts"},
         nested={
             "alert": {
-                "id", "user_id", "rule_type", "threshold",
+                "id", "rule_type", "threshold",
                 "enabled", "created_at", "last_fired",
             },
         },
     ),
     # GET /api/alerts/history — returns fired alert objects
+    # Fields match main.py get_alert_history() response dict (lines ~1253-1264)
     EndpointResponse(
         name="alert_history",
         method="GET",
@@ -144,8 +148,8 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
         fields={"history"},
         nested={
             "fired_alert": {
-                "id", "alert_id", "user_id", "rule_type",
-                "trigger_value", "message", "created_at",
+                "id", "alert_id", "rule_type",
+                "trigger_value", "details", "created_at",
             },
         },
     ),
@@ -154,7 +158,7 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
         name="activity",
         method="GET",
         path="/api/activity",
-        fields={"transactions", "total", "total_pages", "page"},
+        fields={"transactions", "total", "total_pages", "page", "per_page"},
         nested={
             "transaction": {
                 "id", "tx_hash", "type", "amount", "token",
@@ -164,6 +168,7 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
         },
     ),
     # GET /api/whale-suggestions — returns whale suggestion objects
+    # Fields match main.py get_whale_suggestions() response (lines ~1103-1113)
     EndpointResponse(
         name="whale_suggestions",
         method="GET",
@@ -171,7 +176,7 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
         fields={"suggestions"},
         nested={
             "suggestion": {
-                "id", "chain", "address", "label", "source", "added_at",
+                "id", "chain", "address", "label", "source",
             },
         },
     ),

@@ -1010,28 +1010,55 @@ async def refresh_wallet(
             except Exception:
                 pass
 
-    # Convert to USD using dashboard price cache
-    prices = await _fetch_dashboard_prices()
-    _usd_hkd = prices.get("USDHKD", 7.8)
-    _usd_btc = prices.get("USDBTC", 1.0 / 62000.0)
+    # Convert to USD using live CoinGecko price for the specific token
+    # (Pitfall: using _APPROX_PRICE_USD here would produce stale USD values
+    #  when market prices have moved significantly from hardcoded defaults.)
+    _coin_ids = {"eth": "ethereum", "sol": "solana", "btc": "bitcoin"}
+    _coin_id = _coin_ids.get(chain, "ethereum")
+    _token_price_usd = _APPROX_PRICE_USD.get(chain, 1.0)  # fallback default
+    try:
+        from services.tx_fetcher import _get_client
+        _cg_client = await _get_client()
+        _resp = await _cg_client.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": _coin_id, "vs_currencies": "usd,hkd,btc"},
+        )
+        _resp.raise_for_status()
+        _price_data = _resp.json().get(_coin_id, {})
+        if _price_data.get("usd", 0) > 0:
+            _token_price_usd = _price_data["usd"]
+            _usd_hkd = _price_data.get("hkd", 0) / _price_data["usd"] if _price_data.get("hkd") else 7.8
+            _usd_btc = _price_data.get("btc", 0) / _price_data["usd"] if _price_data.get("btc") else 1.0 / 62000.0
+        else:
+            # Fallback to dashboard cache for cross-rates
+            _dash_prices = await _fetch_dashboard_prices()
+            _usd_hkd = _dash_prices.get("USDHKD", 7.8)
+            _usd_btc = _dash_prices.get("USDBTC", 1.0 / 62000.0)
+    except Exception:
+        # Fallback to dashboard cache on any error
+        _dash_prices = await _fetch_dashboard_prices()
+        _usd_hkd = _dash_prices.get("USDHKD", 7.8)
+        _usd_btc = _dash_prices.get("USDBTC", 1.0 / 62000.0)
 
-    # Get approximate native price in USD for this chain
-    _approx = _APPROX_PRICE_USD.get(chain, 1.0)
-    balance_usd = balance_native * _approx
+    balance_usd = balance_native * _token_price_usd
     balance_hkd = round(balance_usd * _usd_hkd, 2)
     balance_btc = round(balance_usd * _usd_btc, 8)
 
-    # Update DB
+    # Update DB with all balance columns so list_wallets and other endpoints
+    # can read converted balances without on-the-fly computation.
     async with acquire_db() as conn:
         await conn.execute(
             """
             UPDATE wallets
             SET balance_native   = $1,
                 balance_usd      = $2,
-                last_balance_update = $3
-            WHERE id = $4
+                balance_hkd      = $3,
+                balance_btc      = $4,
+                last_balance_update = $5
+            WHERE id = $6
             """,
-            balance_native, balance_usd, datetime.utcnow(), wallet_id,
+            balance_native, balance_usd, balance_hkd, balance_btc,
+            datetime.utcnow(), wallet_id,
         )
 
     return {
@@ -1384,8 +1411,10 @@ async def get_signals(
                 "status": s["status"],
                 "wallet_label": s["wallet_label"],
                 "created_at": s["created_at"].isoformat(),
-                "explanation": s["explanation"] if "explanation" in s else None,
-                "explanation_stale": s["explanation_stale"] if "explanation_stale" in s else False,
+                # These columns were added in migration 007; use get() for safety
+                # in case the DB schema hasn't been migrated yet.
+                "explanation": s.get("explanation") if hasattr(s, "get") else (s["explanation"] if "explanation" in s else None),
+                "explanation_stale": bool(s.get("explanation_stale", False)) if hasattr(s, "get") else (s["explanation_stale"] if "explanation_stale" in s else False),
                 "score_at_generation": float(s["score_at_generation"] or 0) if "score_at_generation" in s else 0,
             }
             for s in signals

@@ -123,8 +123,28 @@ async def run_checks(host: str, timeout: float, db_url: str | None = None) -> Li
         try:
             r = await client.get(f"{base}/api/health")
             data = r.json()
-            db_status = data.get("database", "unknown")
-            if db_status == "in_memory":
+            # Support both old format ({"database": "connected"}) and
+            # new subsystem format ({"subsystems": {"db": {"ok": true}}})
+            db_status = data.get("database")
+            if db_status is None:
+                # New subsystem format
+                db_ok = data.get("subsystems", {}).get("db", {}).get("ok")
+                if db_ok is True:
+                    results.append(CheckResult(
+                        "DB is PostgreSQL", "critical", True,
+                        "subsystems.db.ok=true"
+                    ))
+                elif db_ok is False:
+                    results.append(CheckResult(
+                        "DB is PostgreSQL", "critical", False,
+                        "subsystems.db.ok=false — DB unreachable"
+                    ))
+                else:
+                    results.append(CheckResult(
+                        "DB is PostgreSQL", "critical", False,
+                        f"health endpoint missing db status: {data}"
+                    ))
+            elif db_status == "in_memory":
                 results.append(CheckResult(
                     "DB is PostgreSQL", "critical", False,
                     f"database={db_status} — all data lost on restart"
@@ -224,10 +244,15 @@ async def run_checks(host: str, timeout: float, db_url: str | None = None) -> Li
         # ── Check 5: Monitor worker status ──────────────────────────
         monitor_alive = None
         try:
-            # Check if there's a /api/monitor/status or similar
             r = await client.get(f"{base}/api/health")
             data = r.json()
-            monitor_alive = data.get("monitor", data.get("monitor_alive"))
+            # Support both old format and new subsystem format
+            monitor_alive = data.get("monitor")
+            if monitor_alive is None:
+                monitor_alive = data.get("subsystems", {}).get("monitor", {}).get("alive")
+            # Also check top-level monitor_alive for backward compat
+            if monitor_alive is None:
+                monitor_alive = data.get("monitor_alive")
         except Exception:
             pass
 

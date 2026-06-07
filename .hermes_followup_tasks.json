@@ -8,10 +8,5 @@
     "task_type": "analyze_failures",
     "payload": "Investigate the remaining infrastructure issues: (1) PostgreSQL connection failing in production (in-memory fallback), (2) Stale deployed code. These require Zeabur redeployment and cannot be fixed from the sandbox.",
     "status": "pending"
-  },
-  {
-    "task_type": "audit_outputs",
-    "payload": "Run a full frontend-backend field contract audit: extract all field accesses from .jsx files and verify each field is returned by the corresponding API endpoint. Focus on Dashboard.jsx, CopyTrades.jsx, Wallets.jsx, and Activity.jsx.",
-    "status": "pending"
   }
 ]
