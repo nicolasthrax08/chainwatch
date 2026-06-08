@@ -2274,6 +2274,77 @@ async def health_startup_log():
     })
 
 
+# ─── Whale Scorer Diagnostic ─────────────────────────────────────────
+
+@app.get("/api/wallets/{wallet_id}/score")
+async def get_wallet_score(
+    wallet_id: str,
+    user: dict = Depends(get_current_user),
+):
+    """
+    Run the whale scorer on-demand for a specific wallet and return the
+    full scoring breakdown. Useful for debugging why a wallet has a
+    particular whale score without adding debug logging.
+
+    Returns the same dict as whale_scorer.score_whale_wallet() plus
+    wallet metadata (address, chain, label, balance).
+    """
+    async with acquire_db() as conn:
+        wallet = await conn.fetchrow(
+            "SELECT * FROM wallets WHERE id = $1 AND user_id = $2",
+            wallet_id, user["id"],
+        )
+    if not wallet:
+        raise HTTPException(status_code=404, detail="Wallet not found")
+
+    # Pre-compute global median once (same optimization as monitor Phase 6)
+    _global_median_30d = 0.0
+    try:
+        async with acquire_db() as conn:
+            _gm_row = await conn.fetchrow(
+                """
+                SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY cts.amount_usd)
+                    AS global_median_30d
+                FROM copy_trade_signals cts
+                JOIN wallets w ON w.id = cts.wallet_id
+                WHERE w.is_whale = TRUE
+                  AND cts.created_at >= NOW() - INTERVAL '30 days'
+                """
+            )
+            if _gm_row and _gm_row["global_median_30d"] is not None:
+                _global_median_30d = float(_gm_row["global_median_30d"])
+    except Exception:
+        pass  # whale_scorer will fall back to per-wallet subquery
+
+    from services.whale_scorer import score_whale_wallet
+    async with acquire_db() as conn:
+        score_data = await score_whale_wallet(
+            conn, wallet_id, global_median_30d=_global_median_30d,
+        )
+
+    return {
+        "wallet_id": wallet_id,
+        "address": wallet["address"],
+        "chain": wallet["chain"],
+        "label": wallet["label"],
+        "is_whale": wallet["is_whale"],
+        "balance_usd": float(wallet["balance_usd"] or 0),
+        "balance_native": float(wallet["balance_native"] or 0),
+        "score": score_data["score"],
+        "score_activity": score_data["score_activity"],
+        "score_reliability": score_data["score_reliability"],
+        "score_weight": score_data["score_weight"],
+        "score_recency": score_data["score_recency"],
+        "score_diversity": score_data["score_diversity"],
+        "score_signals_used": score_data["score_signals_used"],
+        "score_is_coldstart": score_data["score_is_coldstart"],
+        "median_amount_30d": score_data["median_amount_30d"],
+        "execution_rate_30d": score_data["execution_rate_30d"],
+        "db_stored_score": float(wallet.get("whale_score") or 0),
+        "db_score_calculated_at": wallet["score_calculated_at"].isoformat() if wallet.get("score_calculated_at") else None,
+    }
+
+
 # ─── Serve Frontend (production) ────────────────────────────────────
 
 from fastapi.staticfiles import StaticFiles

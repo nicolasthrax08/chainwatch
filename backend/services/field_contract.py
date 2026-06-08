@@ -178,7 +178,21 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
         nested={
             "suggestion": {
                 "id", "chain", "address", "label", "source",
-            },
+            }
+        },
+    ),
+    # GET /api/wallets/{wallet_id}/score — returns whale scorer diagnostic
+    EndpointResponse(
+        name="wallet_score",
+        method="GET",
+        path="/api/wallets/{wallet_id}/score",
+        fields={
+            "wallet_id", "address", "chain", "label", "is_whale",
+            "balance_usd", "balance_native",
+            "score", "score_activity", "score_reliability", "score_weight",
+            "score_recency", "score_diversity", "score_signals_used",
+            "score_is_coldstart", "median_amount_30d", "execution_rate_30d",
+            "db_stored_score", "db_score_calculated_at",
         },
     ),
 ]
