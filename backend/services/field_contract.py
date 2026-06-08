@@ -240,12 +240,36 @@ def find_frontend_field_accesses(base_path: str) -> List[FieldAccess]:
     """
     Scan frontend .jsx/.js files for field accesses like `obj.field`.
     Returns a list of FieldAccess objects.
+
+    Context-aware filtering:
+    - Tracks WS msg.type === 'signal' / 'alert' blocks. Variable names assigned
+      from msg.payload inside those blocks are checked against WS_MESSAGE_SHAPES
+      and excluded from REST validation (prevents false positives like a.alert_id
+      inside a WS alert handler being flagged as a REST /api/alerts violation).
+    - Tracks .map() iterations over known local arrays (e.g., TX_TYPES.map(t => ...)).
+      Field accesses on the iteration variable are skipped (prevents false positives
+      like t.value / t.label from local constant arrays).
     """
     accesses: List[FieldAccess] = []
     patterns = [
         # Match: obj.field (property access)
         re.compile(r'\b(\w+)\.(\w+)\b'),
     ]
+
+    # Regex to detect WS msg.type blocks
+    _ws_type_block_re = re.compile(
+        r"if\s*\(\s*msg\.type\s*===\s*'(\w+)'\s*\)"
+    )
+    # Regex to detect payload assignment: const a = msg.payload;
+    _ws_payload_assign_re = re.compile(
+        r'\b(?:const|let|var)\s+(\w+)\s*=\s*msg\.payload\b'
+    )
+    # Regex to detect .map() over known local arrays: TX_TYPES.map(t => ...)
+    _local_array_map_re = re.compile(
+        r'\b(\w+)\.map\(\s*(\w+)\s*=>'
+    )
+    # Known local array constants that produce {value, label} objects
+    _known_local_arrays: Set[str] = {"TX_TYPES", "PRESET_ALERTS", "STATUS_COLORS", "chainColors"}
 
     for root, dirs, files in os.walk(base_path):
         dirs[:] = [d for d in dirs if d not in {
@@ -262,16 +286,91 @@ def find_frontend_field_accesses(base_path: str) -> List[FieldAccess]:
             except (UnicodeDecodeError, OSError):
                 continue
 
+            # ── Per-file context tracking ──────────────────────────────────
+            # Track WS msg.type block depth and payload variable names
+            in_ws_block: bool = False
+            ws_block_depth: int = 0
+            ws_payload_vars: Set[str] = set()  # e.g., {"a"} when `const a = msg.payload` inside WS block
+            ws_type: str = ""
+
+            # Track .map() iteration variable names from known local arrays
+            map_iter_vars: Set[str] = set()  # e.g., {"t"} when `TX_TYPES.map(t => ...)`
+
+            # Brace depth tracking for WS block scope
+            brace_depth: int = 0
+            track_braces: bool = False
+
             for line_num, line in enumerate(lines, 1):
                 # Skip comments
                 stripped = line.strip()
                 if stripped.startswith("//") or stripped.startswith("*"):
                     continue
 
+                # ── Detect WS msg.type block entry ─────────────────────────
+                ws_match = _ws_type_block_re.search(line)
+                if ws_match:
+                    in_ws_block = True
+                    ws_type = ws_match.group(1)
+                    ws_payload_vars = set()
+                    track_braces = True
+                    # Count braces, but only from the if-statement onward.
+                    # The opening '{' on this line starts the new block, so
+                    # initial depth is 1 (we're inside the new block).
+                    # We count all braces on the line: the '{' that opens this
+                    # block minus any '}' that closes previous blocks.
+                    brace_depth = line.count('{') - line.count('}')
+                    # If net braces <= 0, the '{' was balanced by a '}' on the
+                    # same line (e.g., `} else if (...) { ... }`), meaning a
+                    # single-line block. For `} else if (...) {`, the '}' closes
+                    # the prior block and '{' opens the new one, so net is 0 but
+                    # we ARE inside the new block. Start with depth=1.
+                    if brace_depth <= 0:
+                        brace_depth = 1
+                    continue
+
+                # ── Track brace depth to know when WS block ends ───────────
+                if in_ws_block and track_braces:
+                    brace_depth += line.count('{') - line.count('}')
+                    if brace_depth <= 0:
+                        in_ws_block = False
+                        track_braces = False
+                        ws_payload_vars = set()
+
+                # ── Detect payload assignment inside WS block ──────────────
+                if in_ws_block:
+                    pa_match = _ws_payload_assign_re.search(line)
+                    if pa_match:
+                        ws_payload_vars.add(pa_match.group(1))
+
+                # ── Detect .map() over known local arrays ──────────────────
+                map_match = _local_array_map_re.search(line)
+                if map_match:
+                    array_name = map_match.group(1)
+                    iter_var = map_match.group(2)
+                    if array_name in _known_local_arrays:
+                        map_iter_vars.add(iter_var)
+
+                # ── Process field accesses ─────────────────────────────────
                 for pat in patterns:
                     for m in pat.finditer(line):
                         obj_name = m.group(1)
                         field_name = m.group(2)
+
+                        # Skip if this is a WS payload variable inside a WS block
+                        if obj_name in ws_payload_vars and in_ws_block:
+                            # Check if the field is valid in WS_MESSAGE_SHAPES
+                            type_shapes = WS_MESSAGE_SHAPES.get(ws_type, {})
+                            ws_fields: Set[str] = set()
+                            for action_fields in type_shapes.values():
+                                ws_fields.update(action_fields)
+                            if field_name in ws_fields:
+                                continue  # Valid WS field — not a REST violation
+                            # If not in WS shapes either, skip it anyway (it's a WS access, not REST)
+                            continue
+
+                        # Skip if this is a .map() iteration variable from a known local array
+                        if obj_name in map_iter_vars:
+                            continue
 
                         # Skip common non-data objects
                         if obj_name in {
