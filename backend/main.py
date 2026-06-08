@@ -255,7 +255,7 @@ def acquire_db():
     return db_pool.acquire()
 
 
-def create_jwt(wallet_address: str, user_id: str = "") -> str:
+def create_jwt(wallet_address: str, user_id: str = "", created_at: str = "") -> str:
     payload = {
         "sub": wallet_address,
         "uid": user_id,
@@ -263,6 +263,8 @@ def create_jwt(wallet_address: str, user_id: str = "") -> str:
         "exp": datetime.utcnow() + timedelta(days=7),
         "jti": str(uuid.uuid4()),
     }
+    if created_at:
+        payload["cat"] = created_at  # "cat" = created_at (short to keep token small)
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
 
@@ -334,9 +336,14 @@ async def get_current_user(
 
     # Optimization (BUG-18): Extract user_id from JWT payload to avoid DB lookup
     # on every authenticated request. The uid is embedded at JWT creation time.
+    # Also extract created_at (Pitfall #21) to avoid DB round-trip in get_me().
     user_id = payload.get("uid")
     if user_id:
-        return {"id": user_id, "wallet_address": payload["sub"]}
+        return {
+            "id": user_id,
+            "wallet_address": payload["sub"],
+            "created_at": payload.get("cat", ""),  # "cat" = created_at from JWT
+        }
 
     # Fallback: verify user still exists in DB (for old tokens without uid)
     async with acquire_db() as conn:
@@ -443,8 +450,12 @@ async def verify_signature(req: WalletConnectRequest):
             req.wallet_address.lower()
         )
 
-        # Create JWT with user_id embedded to avoid DB lookup on every request
-        token = create_jwt(req.wallet_address.lower(), user_id=str(user["id"]))
+        # Create JWT with user_id + created_at embedded to avoid DB lookup on every request
+        token = create_jwt(
+            req.wallet_address.lower(),
+            user_id=str(user["id"]),
+            created_at=user["created_at"].isoformat() if user.get("created_at") else "",
+        )
 
         # Update session
         await conn.execute(
@@ -469,14 +480,11 @@ async def verify_signature(req: WalletConnectRequest):
 
 @app.get("/api/auth/me")
 async def get_me(user: dict = Depends(get_current_user)):
-    # Fetch created_at from DB since JWT payload doesn't carry it (Finding: KeyError on created_at)
-    async with acquire_db() as conn:
-        row = await conn.fetchrow(
-            "SELECT created_at FROM users WHERE id = $1", user["id"]
-        )
+    # Pitfall #21 fix: created_at is embedded in JWT payload at token creation time.
+    # No DB round-trip needed. Falls back to None for old tokens that lack the "cat" claim.
     return {
         "wallet_address": user["wallet_address"],
-        "created_at": row["created_at"].isoformat() if row else None,
+        "created_at": user.get("created_at") or None,
     }
 
 
@@ -2232,11 +2240,11 @@ async def health_diagnostic():
         try:
             async with db_pool.acquire() as conn:
                 applied = await conn.fetch(
-                    "SELECT filename, applied_at FROM _migration_log ORDER BY applied_at"
+                    "SELECT file_name, applied_at FROM _migration_log ORDER BY applied_at"
                 )
                 report["checks"]["migrations"] = {
                     "applied_count": len(applied),
-                    "latest": applied[-1]["filename"] if applied else None,
+                    "latest": applied[-1]["file_name"] if applied else None,
                     "latest_at": str(applied[-1]["applied_at"]) if applied else None,
                 }
         except Exception as e:
