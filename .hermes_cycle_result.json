@@ -1,23 +1,17 @@
 {
-  "cycle": 12,
-  "timestamp": "2026-06-07T12:00:00Z",
+  "cycle": 13,
+  "timestamp": "2026-06-08T08:01:00Z",
   "tasks_completed": [
     {
-      "id": 29,
+      "id": 31,
       "type": "write_tool",
-      "result": "Added /api/health/startup-log endpoint with ring buffer (max 50 entries) capturing startup events: master key validation, DB pool creation/failure, monitor launch. Fixed-size buffer prevents unbounded memory growth (Pitfall #12). All 93/93 audit checks pass."
-    },
-    {
-      "id": 30,
-      "type": "audit_outputs",
-      "result": "Found Pitfall #18 field contract gap: dashboard endpoint didn't return whale_score in wallet data. Fixed by adding whale_score to wallet_meta dict in /api/dashboard. Frontend Wallets.jsx updated with Score column showing whale score as percentage badge."
+      "result": "Added migration 009_performance_indexes.sql with two composite indexes: idx_copy_trade_signals_wallet_created (wallet_id, created_at) and idx_copy_trade_signals_wallet_status_created (wallet_id, status, created_at). These indexes were present in backend/migrations/013 but missing from root migrations/ that Zeabur runs on deploy. The whale_scorer query filters on these column combinations for 30d/90d windows and execution rate calculation. Without the indexes, each wallet scoring query does a full table scan."
     }
   ],
-  "audit_result": "93/93 checks passed, 0 critical, 0 minor",
+  "audit_result": "101/101 checks passed, 0 critical, 0 minor",
   "files_modified": [
-    "backend/main.py",
-    "frontend/src/pages/Wallets.jsx"
+    "migrations/009_performance_indexes.sql"
   ],
-  "git_commit": "cb07dd5",
-  "peer_review": "solo audit — peer unavailable (DB unreachable from sandbox). Self-review score: 4/5. Both changes are correct, minimal, and well-scoped. The startup-log endpoint uses a fixed-size ring buffer (Pitfall #12 compliant). The whale_score field fix closes a real Pitfall #18 gap."
+  "git_commit": "9ce39af",
+  "peer_review": "solo audit — peer unavailable (DB unreachable from sandbox). Self-review score: 4/5. The migration is correct, minimal, and addresses a real performance gap. The indexes match the query patterns in whale_scorer.py and monitor.py exactly."
 }

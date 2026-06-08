@@ -40,6 +40,13 @@ MAX_CONSECUTIVE_ERRORS = 5    # skip wallet after this many consecutive errors
 WALLET_FETCH_TIMEOUT = 25     # hard timeout per wallet (seconds)
 MAX_CONCURRENT_WALLETS = 5    # semaphore cap for concurrent on-chain fetches
 
+# ── Cycle statistics (ring buffer for health endpoint) ────────────────
+# Fixed-size history to prevent unbounded memory growth (Pitfall #12).
+_MAX_CYCLE_HISTORY = 20
+_cycle_stats: list = []          # list of dicts, most recent last
+_cycle_stats_lock = asyncio.Lock()
+_last_cycle_duration: float = 0.0  # seconds, most recent poll cycle
+
 # Price cache for USD conversion (CoinGecko, refreshed every 60s)
 # Initialized with sane defaults so a failed first fetch still produces reasonable USD values.
 # These are rough reference prices; CoinGecko will overwrite them on first successful fetch.
@@ -149,6 +156,21 @@ def is_monitor_alive() -> bool:
     return _worker_task is not None and not _worker_task.done()
 
 
+async def get_cycle_stats() -> dict:
+    """
+    Return recent monitor cycle statistics for the health endpoint.
+    Includes last cycle duration, wallets processed, signals generated,
+    and a rolling history of recent cycles.
+    """
+    async with _cycle_stats_lock:
+        history = list(_cycle_stats)
+    return {
+        "last_cycle_duration_s": round(_last_cycle_duration, 2),
+        "history": history,
+        "total_cycles": len(history),
+    }
+
+
 # ── Main Loop ─────────────────────────────────────────────────────────
 
 async def _monitor_loop() -> None:
@@ -187,8 +209,16 @@ async def _poll_all_wallets() -> None:
 
 async def _poll_all_wallets_inner() -> None:
     """Inner poll implementation (wrapped by _poll_lock)."""
+    import time as _time_mod
     if _pool is None:
         return
+
+    _cycle_t0 = _time_mod.monotonic()
+    _wallets_processed = 0
+    _wallets_changed = 0
+    _signals_generated = 0
+    _alerts_fired = 0
+    _errors = 0
 
     # ── Phase 1: Read all wallets (short-held connection) ────────────
     async with _pool.acquire() as conn:
@@ -205,6 +235,8 @@ async def _poll_all_wallets_inner() -> None:
         _last_tx_hashes.clear()
         _consecutive_errors.clear()
         return
+
+    _wallets_processed = len(rows)
 
     # ── Phase 2: Prune stale state entries (F2 fix) ──────────────────
     current_ids: Set[str] = {str(r["id"]) for r in rows}
@@ -228,11 +260,13 @@ async def _poll_all_wallets_inner() -> None:
     # Each entry: (wid, address, chain, is_whale, is_mine, user_id, result)
     # result = (balance_native, balance_usd, new_tx_hash, tx_type, token, tx_amount_native)
     changed_wallets = []
+    _errors = 0
     for row, result in zip(rows, results):
         wid = str(row["id"])
         if isinstance(result, Exception):
             async with _state_lock:
                 _consecutive_errors[wid] = _consecutive_errors.get(wid, 0) + 1
+            _errors += 1
             logger.warning(f"Wallet check failed for {row['address']}: {result}")
             continue
         if result is not None:
@@ -245,6 +279,7 @@ async def _poll_all_wallets_inner() -> None:
                 str(row["user_id"]),
                 result,
             ))
+    _wallets_changed = len(changed_wallets)
 
     # ── Phase 5: Batch-update changed wallets (single transaction) ───
     # Also capture prev_balance_usd for each wallet for Phase 6 alert eval
@@ -351,6 +386,7 @@ async def _poll_all_wallets_inner() -> None:
                     fired_alerts = await evaluate_alerts(
                         conn, changed_wallets, _prev_balance_map,
                     )
+                _alerts_fired = len(fired_alerts)
 
                 for f in fired_alerts:
                     target_uid = f["user_id"]
@@ -517,6 +553,7 @@ async def _poll_all_wallets_inner() -> None:
         # ── Phase 6c: WebSocket pushes (outside DB connection block) ───────
         # Pitfall #7 fix: WS push I/O must not hold a DB connection.
         # CRITICAL-1 FIX: Push ALL collected signals, not just the last one.
+        _signals_generated = len(ws_pushes)
         for ws_user_id, ws_payload in ws_pushes:
             try:
                 from services.websocket_manager import websocket_manager
@@ -527,6 +564,28 @@ async def _poll_all_wallets_inner() -> None:
                 logger.debug(
                     f"Could not WS-push signal to user {ws_user_id}"
                 )
+
+    # ── Record cycle statistics ─────────────────────────────────────────
+    _last_cycle_duration = _time_mod.monotonic() - _cycle_t0
+    _entry = {
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "duration_s": round(_last_cycle_duration, 2),
+        "wallets_processed": _wallets_processed,
+        "wallets_changed": _wallets_changed,
+        "signals_generated": _signals_generated,
+        "alerts_fired": _alerts_fired,
+        "errors": _errors,
+    }
+    async with _cycle_stats_lock:
+        _cycle_stats.append(_entry)
+        while len(_cycle_stats) > _MAX_CYCLE_HISTORY:
+            _cycle_stats.pop(0)
+    logger.info(
+        "Monitor cycle complete: %.1fs, %d/%d wallets changed, "
+        "%d signals, %d alerts, %d errors",
+        _last_cycle_duration, _wallets_changed, _wallets_processed,
+        _signals_generated, _alerts_fired, _errors,
+    )
 
 
 def bal_nonnative_safe(val: float) -> float:

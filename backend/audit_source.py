@@ -2725,6 +2725,121 @@ def check_alpaca_validation_before_db(py_files: List[str], result: AuditResult):
     result.add_pass("Pitfall #7 (Alpaca): No connect_alpaca found (check not applicable)")
 
 
+def check_portfolio_change_delta_consistency(py_files: List[str], result: AuditResult):
+    """
+    New check (Cycle 12): Verify that portfolio_change alert rule's delta_sum
+    only includes personal (is_mine=True, is_whale=False) wallets, matching the
+    current_total SQL query. Including whale wallet deltas in delta_sum while
+    excluding them from current_total causes incorrect prev_total computation.
+
+    See: dual-agent pitfall — portfolio_change delta mismatch.
+    """
+    for fpath in py_files:
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+            continue
+        text = read_file(fpath)
+        file_lines = lines(text)
+
+        # Find the portfolio_change rule block and extract delta_sum filter
+        in_portfolio_change = False
+        found_delta_sum = False
+        delta_filter_text = ""
+        delta_paren_depth = 0
+
+        for i, line in enumerate(file_lines, 1):
+            if 'rule_type == "portfolio_change"' in line or "rule_type == 'portfolio_change'" in line:
+                in_portfolio_change = True
+                continue
+            if in_portfolio_change:
+                # Detect delta_sum = sum( start
+                if "delta_sum" in line and "sum(" in line:
+                    found_delta_sum = True
+                    delta_filter_text = line
+                    delta_paren_depth = line.count("(") - line.count(")")
+                    continue
+                # Accumulate multi-line generator expression after delta_sum = sum(
+                if found_delta_sum and "delta_sum" not in line:
+                    delta_filter_text += " " + line.strip()
+                    delta_paren_depth += line.count("(") - line.count(")")
+                    # Only break when the sum( call's parentheses are fully closed
+                    # (paren_depth back to 0) — this ensures we also capture the
+                    # "for ... if ..." clause that follows the generator body.
+                    if delta_paren_depth <= 0:
+                        # sum( call closed; keep accumulating for "for ... if ..." clause
+                        found_delta_sum = False  # stop depth tracking
+                        delta_filter_text += " "
+                        continue
+                # Continue accumulating "for ... if ..." clause after sum() closed
+                if not found_delta_sum and delta_filter_text:
+                    if "for " in line or "if " in line:
+                        delta_filter_text += " " + line.strip()
+                        if "):\n" in line or line.strip().endswith("):"):
+                            break
+                    elif "prev_total" in line:
+                        # Reached the next statement; stop accumulation
+                        break
+                # Exit portfolio_change block when we hit next elif/else
+                if "elif rule_type" in line or "else:" in line:
+                    in_portfolio_change = False
+                    found_delta_sum = False
+
+        if found_delta_sum:
+            # sum( was found but never closed (unbalanced parens) — skip validation
+            return
+        if delta_filter_text:
+            if "is_mine" not in delta_filter_text and "is_mine_flag" not in delta_filter_text:
+                # Find the line number of the delta_sum
+                delta_line = 0
+                for i, line in enumerate(file_lines, 1):
+                    if "delta_sum" in line and "sum(" in line:
+                        delta_line = i
+                        break
+                result.add(Finding(
+                    pitfall="Pitfall #F1: portfolio_change delta_sum missing is_mine filter",
+                    file=fpath,
+                    line=delta_line,
+                    description=(
+                        "portfolio_change alert delta_sum iterates over ALL changed wallets "
+                        "but current_total only sums is_mine=TRUE AND is_whale=FALSE wallets. "
+                        "Including whale wallet deltas causes incorrect prev_total computation."
+                    ),
+                    suggestion=(
+                        "Add 'and is_mine_flag and not is_whale_flag' to the delta_sum filter "
+                        "to match the current_total SQL query's is_mine/is_whale conditions."
+                    ),
+                    severity="critical",
+                ))
+                return
+            if "is_whale" not in delta_filter_text and "is_whale_flag" not in delta_filter_text:
+                delta_line = 0
+                for i, line in enumerate(file_lines, 1):
+                    if "delta_sum" in line and "sum(" in line:
+                        delta_line = i
+                        break
+                result.add(Finding(
+                    pitfall="Pitfall #F1: portfolio_change delta_sum missing is_whale filter",
+                    file=fpath,
+                    line=delta_line,
+                    description=(
+                        "portfolio_change alert delta_sum does not exclude whale wallets. "
+                        "current_total only sums is_whale=FALSE wallets."
+                    ),
+                    suggestion=(
+                        "Add 'and not is_whale_flag' to the delta_sum filter "
+                        "to match the current_total SQL query's is_whale=FALSE condition."
+                    ),
+                    severity="critical",
+                ))
+                return
+            result.add_pass(
+                f"Pitfall #F1: portfolio_change delta_sum in {fpath} "
+                f"correctly filters is_mine and is_whale"
+            )
+            return
+
+    result.add_pass("Pitfall #F1: No portfolio_change rule found (check not applicable)")
+
+
 def check_endpoint_response_field_consistency(py_files: List[str], jsx_files: List[str], result: AuditResult):
     """
     New check: Verify that list_wallets and /api/dashboard return the same set of
@@ -2867,6 +2982,7 @@ def run_audit(base_path: str) -> AuditResult:
     check_concurrent_price_fetch(py_files, result)
     check_get_me_jwt_created_at(py_files, result)
     check_alpaca_validation_before_db(py_files, result)
+    check_portfolio_change_delta_consistency(py_files, result)
     check_endpoint_response_field_consistency(py_files, jsx_files, result)
 
     return result

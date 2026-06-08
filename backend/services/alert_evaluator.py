@@ -223,8 +223,8 @@ async def evaluate_alerts(
                 # This avoids a redundant DB query for prev_total_row (Pitfall #16).
                 delta_sum = sum(
                     (result[1] - prev_balance_map.get(wid, result[1]))  # delta = current - prev
-                    for wid, _, _, _, _, uid, result in changed_wallets
-                    if str(uid) == str(user_id)
+                    for wid, _, _, is_whale_flag, is_mine_flag, uid, result in changed_wallets
+                    if str(uid) == str(user_id) and is_mine_flag and not is_whale_flag
                 )
                 prev_total = current_total - delta_sum
 

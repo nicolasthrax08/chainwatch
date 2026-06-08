@@ -2064,11 +2064,16 @@ async def health_check():
 
     # ── Monitor worker ──
     try:
-        from services.monitor import is_monitor_alive
+        from services.monitor import is_monitor_alive, get_cycle_stats
         monitor_alive = is_monitor_alive()
+        cycle_stats = await get_cycle_stats()
     except Exception:
         monitor_alive = False
-    report["subsystems"]["monitor"] = {"alive": monitor_alive}
+        cycle_stats = {}
+    report["subsystems"]["monitor"] = {
+        "alive": monitor_alive,
+        "cycle_stats": cycle_stats,
+    }
 
     # ── Price cache freshness ──
     try:
@@ -2289,18 +2294,19 @@ async def get_wallet_score(
     Returns the same dict as whale_scorer.score_whale_wallet() plus
     wallet metadata (address, chain, label, balance).
     """
+    # Fetch wallet, global median, and compute score using a single DB connection
+    # to avoid acquiring 3 separate pool connections (Pitfall #7: connection efficiency).
+    _global_median_30d = 0.0
+    from services.whale_scorer import score_whale_wallet
     async with acquire_db() as conn:
         wallet = await conn.fetchrow(
             "SELECT * FROM wallets WHERE id = $1 AND user_id = $2",
             wallet_id, user["id"],
         )
-    if not wallet:
-        raise HTTPException(status_code=404, detail="Wallet not found")
+        if not wallet:
+            raise HTTPException(status_code=404, detail="Wallet not found")
 
-    # Pre-compute global median once (same optimization as monitor Phase 6)
-    _global_median_30d = 0.0
-    try:
-        async with acquire_db() as conn:
+        try:
             _gm_row = await conn.fetchrow(
                 """
                 SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY cts.amount_usd)
@@ -2313,11 +2319,9 @@ async def get_wallet_score(
             )
             if _gm_row and _gm_row["global_median_30d"] is not None:
                 _global_median_30d = float(_gm_row["global_median_30d"])
-    except Exception:
-        pass  # whale_scorer will fall back to per-wallet subquery
+        except Exception:
+            pass  # whale_scorer will fall back to per-wallet subquery
 
-    from services.whale_scorer import score_whale_wallet
-    async with acquire_db() as conn:
         score_data = await score_whale_wallet(
             conn, wallet_id, global_median_30d=_global_median_30d,
         )

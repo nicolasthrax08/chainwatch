@@ -195,6 +195,16 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
             "db_stored_score", "db_score_calculated_at",
         },
     ),
+    # GET /api/whale-sentiment — returns whale sentiment aggregation
+    EndpointResponse(
+        name="whale_sentiment",
+        method="GET",
+        path="/api/whale-sentiment",
+        fields={
+            "sentiment_score", "classification",
+            "inflow_usd", "outflow_usd", "tx_count",
+        },
+    ),
 ]
 
 # ─── WebSocket message shape registry ──────────────────────────────────
@@ -247,6 +257,11 @@ OBJECT_NAME_MAP: Dict[str, List[str]] = {
     "transaction": ["transaction"],
     "t": ["transaction"],
     "suggestion": ["suggestion"],
+    # "sentiment" is returned by /api/whale-sentiment as a flat object
+    # (not wrapped in a list key), so top-level fields are checked directly.
+    # We use the special key "_top_level" to indicate the endpoint's own
+    # top-level fields should be checked.
+    "sentiment": ["_top_level"],
 }
 
 
@@ -285,6 +300,13 @@ def find_frontend_field_accesses(base_path: str) -> List[FieldAccess]:
     # Known local array constants that produce {value, label} objects
     _known_local_arrays: Set[str] = {"TX_TYPES", "PRESET_ALERTS", "STATUS_COLORS", "chainColors"}
 
+    # Regex to detect inline array literals with .map(): [{...}, ...].map(s => ...)
+    # This catches patterns like `subscores.map(s => ...)` where subscores is
+    # defined as a local const with an inline array literal.
+    _inline_array_const_re = re.compile(
+        r'\b(?:const|let|var)\s+(\w+)\s*=\s*\['
+    )
+
     for root, dirs, files in os.walk(base_path):
         dirs[:] = [d for d in dirs if d not in {
             "node_modules", ".git", "__pycache__", ".venv", "venv",
@@ -308,7 +330,9 @@ def find_frontend_field_accesses(base_path: str) -> List[FieldAccess]:
             ws_type: str = ""
 
             # Track .map() iteration variable names from known local arrays
+            # and inline array constants (e.g., `const subscores = [...]`).
             map_iter_vars: Set[str] = set()  # e.g., {"t"} when `TX_TYPES.map(t => ...)`
+            inline_array_vars: Set[str] = set()  # e.g., {"subscores"} when `const subscores = [...]`
 
             # Brace depth tracking for WS block scope
             brace_depth: int = 0
@@ -363,6 +387,16 @@ def find_frontend_field_accesses(base_path: str) -> List[FieldAccess]:
                     iter_var = map_match.group(2)
                     if array_name in _known_local_arrays:
                         map_iter_vars.add(iter_var)
+                    # Also catch inline array constants: `subscores.map(s => ...)`
+                    # where subscores was previously detected as an inline array var
+                    elif array_name in inline_array_vars:
+                        map_iter_vars.add(iter_var)
+
+                # ── Detect inline array literal constants ──────────────────
+                # e.g., `const subscores = [` or `let subscores = [`
+                inline_match = _inline_array_const_re.search(line)
+                if inline_match:
+                    inline_array_vars.add(inline_match.group(1))
 
                 # ── Process field accesses ─────────────────────────────────
                 for pat in patterns:
@@ -475,6 +509,11 @@ def validate_contracts(
         found = False
         for ep in ENDPOINT_RESPONSES:
             for rk in response_keys:
+                # Special key: _top_level means check the endpoint's own top-level fields
+                if rk == "_top_level":
+                    if fa.field_name in ep.fields:
+                        found = True
+                        break
                 if rk in ep.nested and fa.field_name in ep.nested[rk]:
                     found = True
                     break

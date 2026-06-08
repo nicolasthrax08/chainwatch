@@ -1,0 +1,16 @@
+{
+  "follow_up_tasks": [
+    {
+      "task_type": "audit_outputs",
+      "payload": "{\"action\": \"verify_whale_scorer_optimization_in_production\", \"detail\": \"After next deployment, verify that the global_median_30d optimization is working by checking monitor logs for the pre-compute query timing\", \"priority\": \"medium\"}"
+    },
+    {
+      "task_type": "review_thresholds",
+      "payload": "{\"action\": \"review_MIN_WHALE_SCORE_threshold\", \"detail\": \"The MIN_WHALE_SCORE threshold in signal_generator.py is set to 0.20. Review whether this is still appropriate given the new cold-start blend formula in whale_scorer.\", \"priority\": \"medium\"}"
+    },
+    {
+      "task_type": "write_tool",
+      "payload": "{\"action\": \"add_monitor_cycle_timing_metrics\", \"detail\": \"Add per-phase timing instrumentation to _poll_all_wallets_inner() so each phase reports its duration. Use monotonic clock, log at INFO level only if phase exceeds threshold.\", \"priority\": \"low\"}"
+    }
+  ]
+}
