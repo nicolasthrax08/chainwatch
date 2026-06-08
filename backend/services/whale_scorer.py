@@ -22,13 +22,21 @@ logger = logging.getLogger("chainwatch.whale_scorer")
 SCORE_QUERY_SLOW_THRESHOLD_MS = 500
 
 
-async def score_whale_wallet(conn, wallet_id: str) -> dict:
+async def score_whale_wallet(
+    conn,
+    wallet_id: str,
+    global_median_30d: float = 0.0,
+) -> dict:
     """
     Compute the whale score for a single wallet.
 
     Args:
         conn: active asyncpg connection (caller manages transaction)
         wallet_id: UUID of the wallet to score
+        global_median_30d: pre-computed global median from monitor cycle.
+            When > 0, the per-wallet global_median subquery is skipped (O(1) vs O(N)).
+            When 0 (default), the per-wallet subquery runs as fallback for
+            callers outside the monitor loop (e.g., ad-hoc scoring).
 
     Returns:
         dict with keys:
@@ -37,10 +45,28 @@ async def score_whale_wallet(conn, wallet_id: str) -> dict:
             score_is_coldstart, median_amount_30d, execution_rate_30d
     """
 
+    # ── Conditionally include global_median subquery ──────────────────
+    # When the monitor pre-computes this value, skip the per-wallet subquery
+    # entirely to avoid O(N) subqueries across all wallets in a cycle.
+    if global_median_30d > 0:
+        global_median_select = f"{global_median_30d}::DECIMAL AS global_median_30d_from_param"
+        global_median_col = "global_median_30d_from_param"
+    else:
+        global_median_select = """
+            (
+                SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY cts2.amount_usd)
+                FROM copy_trade_signals cts2
+                JOIN wallets w2 ON w2.id = cts2.wallet_id
+                WHERE w2.is_whale = TRUE
+                  AND cts2.created_at >= NOW() - INTERVAL '30 days'
+            ) AS global_median_30d_from_param
+        """
+        global_median_col = "global_median_30d_from_param"
+
     # ── Fetch all features in a single query ──────────────────────────
     _t0 = _time.monotonic()
     row = await conn.fetchrow(
-        """
+        f"""
         SELECT
             -- F1: signal count 30d
             COUNT(*) FILTER (WHERE cts.created_at >= NOW() - INTERVAL '30 days')
@@ -75,16 +101,8 @@ async def score_whale_wallet(conn, wallet_id: str) -> dict:
                 ORDER BY cts.amount_usd
             ) FILTER (WHERE cts.created_at >= NOW() - INTERVAL '30 days')
                 AS median_signal_amount_30d,
-            -- Global whale median fallback (all whale wallet signals in 30d)
-            -- NOTE: This subquery runs once per wallet. For large whale sets,
-            -- consider pre-computing global_median once per monitor cycle.
-            (
-                SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY cts2.amount_usd)
-                FROM copy_trade_signals cts2
-                JOIN wallets w2 ON w2.id = cts2.wallet_id
-                WHERE w2.is_whale = TRUE
-                  AND cts2.created_at >= NOW() - INTERVAL '30 days'
-            ) AS global_median_30d,
+            -- Global whale median (provided by monitor or computed as fallback)
+            {global_median_select},
             -- F7: tokens traded 30d
             COUNT(DISTINCT cts.token_symbol) FILTER (
                 WHERE cts.created_at >= NOW() - INTERVAL '30 days'
@@ -143,7 +161,7 @@ async def score_whale_wallet(conn, wallet_id: str) -> dict:
     execution_rate_30d = float(row["execution_rate_30d"] or 0)
     execution_rate_90d = float(row["execution_rate_90d"] or 0)
     median_30d_raw = row["median_signal_amount_30d"]
-    global_median_30d_raw = row["global_median_30d"]
+    global_median_30d_raw = row["global_median_30d_from_param"]
     signals_30d_for_median = row["signal_count_30d_for_median"] or 0
     tokens_traded_30d = row["tokens_traded_30d"] or 0
     recency_days_raw = row["recency_days_raw"]

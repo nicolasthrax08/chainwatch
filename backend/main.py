@@ -892,6 +892,7 @@ async def list_wallets(user: dict = Depends(get_current_user)):
                 "balance_usd": float(w["balance_usd"]) if w.get("balance_usd") is not None else None,
                 "balance_hkd": float(w["balance_hkd"]) if w.get("balance_hkd") is not None else None,
                 "balance_btc": float(w["balance_btc"]) if w.get("balance_btc") is not None else None,
+                "whale_score": float(w.get("whale_score") or 0),
                 "last_balance_update": w["last_balance_update"].isoformat() if w.get("last_balance_update") else None,
                 "created_at": w["created_at"].isoformat()
             }

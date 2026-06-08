@@ -103,6 +103,7 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
             "wallet": {
                 "id", "address", "chain", "label", "is_whale", "is_mine",
                 "balance_usd", "balance_hkd", "balance_btc",
+                "whale_score",
                 "last_balance_update", "created_at",
             },
         },
