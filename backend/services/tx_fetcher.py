@@ -339,7 +339,8 @@ async def fetch_sol_transactions(
                         post_balances[addr_idx] - pre_balances[addr_idx]
                     ) / 1e9
 
-                net_sol = max(net_sol, 0)  # Clamp to 0 if no balance change
+                # FIX: Do NOT clamp net_sol to 0 — negative values indicate sends.
+                # max(net_sol, 0) caused all outgoing SOL txs to be classified as "unknown".
                 tx_type = (
                     "receive" if net_sol > 0 else
                     "send" if net_sol < 0 else "unknown"

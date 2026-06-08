@@ -20,7 +20,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Set, Tuple
 
 
 @dataclass
@@ -2547,6 +2547,268 @@ def check_concurrent_price_fetch(py_files: List[str], result: AuditResult):
     result.add_pass("Performance: _ensure_prices_fetched not found (no check needed)")
 
 
+def check_get_me_jwt_created_at(py_files: List[str], result: AuditResult):
+    """
+    Pitfall #21 residual: The get_me endpoint should embed created_at in the JWT
+    at token creation time, avoiding a DB SELECT on every /api/auth/me call.
+    """
+    for fpath in py_files:
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+            continue
+        text = read_file(fpath)
+        if "def get_me" not in text:
+            continue
+
+        file_lines = lines(text)
+
+        for i, line in enumerate(file_lines, 1):
+            if re.search(r"def\s+get_me\b", line):
+                # Extract function body: from def to next def/class at same indent
+                func_body_lines = []
+                func_indent = len(line) - len(line.lstrip())
+                for j in range(i, min(i + 50, len(file_lines))):
+                    next_line = file_lines[j]
+                    next_stripped = next_line.lstrip()
+                    if next_stripped and not next_line[0].isspace() and j > i:
+                        if next_stripped.startswith("def ") or next_stripped.startswith("class ") or next_stripped.startswith("@app."):
+                            break
+                    func_body_lines.append(next_line)
+
+                body = "\n".join(func_body_lines)
+                has_db_created_at = bool(
+                    re.search(r"SELECT\s+.*created_at\s+FROM\s+users", body, re.IGNORECASE)
+                )
+                if has_db_created_at:
+                    result.add(Finding(
+                        pitfall="#21",
+                        severity="minor",
+                        file=fpath,
+                        line=i,
+                        description=(
+                            "get_me endpoint does 'SELECT created_at FROM users' on every call. "
+                            "Embed created_at in the JWT at token creation time to save "
+                            "one DB round-trip per authenticated session refresh."
+                        ),
+                        suggestion=(
+                            "Add 'created_at' to the JWT payload in create_jwt() and "
+                            "extract it in get_me() as user.get('created_at') without hitting the DB."
+                        ),
+                    ))
+                else:
+                    result.add_pass(
+                        f"Pitfall #21 residual: get_me in {fpath} — no DB SELECT for created_at"
+                    )
+                break
+
+
+def check_alpaca_validation_before_db(py_files: List[str], result: AuditResult):
+    """
+    Pitfall #7 variant: The connect_alpaca endpoint must validate credentials
+    against Alpaca (HTTP call) BEFORE acquiring a DB connection. If the HTTP
+    call happens while holding a DB connection, the connection sits idle during
+    the external API round-trip.
+
+    Detection: Look for ALPACA_BASE_URL or APCA-API inside an `acquire_db`
+    block by checking indentation. The HTTP call to Alpaca should be at the
+    function's top level (lower indentation), not indented under acquire_db.
+    """
+    HTTP_ALPACA_PATTERNS = re.compile(
+        r"(?:ALPACA_BASE_URL|APCA-API|paper-api\.alpaca)",
+        re.IGNORECASE,
+    )
+
+    for fpath in py_files:
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+            continue
+        text = read_file(fpath)
+        if "connect_alpaca" not in text:
+            continue
+
+        file_lines = lines(text)
+        in_func = False
+        func_start = 0
+        func_indent = 0
+        in_acquire_db = False
+        acquire_db_indent = 0
+        http_inside_db = False
+        found_func = False
+
+        for i, line in enumerate(file_lines, 1):
+            stripped = line.lstrip()
+            if not stripped:
+                continue
+            indent = len(line) - len(stripped)
+
+            if re.search(r"def\s+connect_alpaca\b", line):
+                in_func = True
+                func_start = i
+                func_indent = indent
+                found_func = True
+                in_acquire_db = False
+                http_inside_db = False
+                continue
+
+            if not in_func:
+                continue
+
+            # End of function: next def/class/at same or lesser indentation
+            if indent <= func_indent and (
+                stripped.startswith("def ")
+                or stripped.startswith("class ")
+                or stripped.startswith("@app.")
+            ):
+                if found_func:
+                    if http_inside_db:
+                        result.add(Finding(
+                            pitfall="#7",
+                            severity="minor",
+                            file=fpath,
+                            line=func_start,
+                            description=(
+                                "connect_alpaca makes Alpaca HTTP API calls inside "
+                                "an acquire_db block. The DB connection sits idle during "
+                                "the external HTTP round-trip."
+                            ),
+                            suggestion=(
+                                "Restructure to: (1) validate Alpaca credentials via HTTP first, "
+                                "(2) then acquire DB connection only for the UPDATE write."
+                            ),
+                        ))
+                    else:
+                        result.add_pass(
+                            f"Pitfall #7 (Alpaca): connect_alpaca in {fpath} — "
+                            "HTTP validation outside DB block (OK)"
+                        )
+                    in_func = False
+                continue
+
+            # Track acquire_db blocks by indentation
+            if "acquire_db()" in line or "acquire_db()" in stripped:
+                in_acquire_db = True
+                acquire_db_indent = indent
+                continue
+
+            # If we're inside an acquire_db block and see an Alpaca HTTP call
+            if in_acquire_db and HTTP_ALPACA_PATTERNS.search(line):
+                http_inside_db = True
+
+            # Exit acquire_db block when indentation returns to function level
+            if in_acquire_db and indent <= func_indent + 1 and stripped:
+                # We've exited the acquire_db indent level
+                # But need to be careful: acquire_db is typically 8-12 spaces indented
+                # and its body is 12-16 spaces
+                if indent <= acquire_db_indent:
+                    in_acquire_db = False
+
+        # Handle function at end of file
+        if in_func:
+            if http_inside_db:
+                result.add(Finding(
+                    pitfall="#7",
+                    severity="minor",
+                    file=fpath,
+                    line=func_start,
+                    description=(
+                        "connect_alpaca makes Alpaca HTTP API calls inside "
+                        "an acquire_db block."
+                    ),
+                    suggestion=(
+                        "Restructure to: (1) validate Alpaca credentials via HTTP first, "
+                        "(2) then acquire_db() only for the UPDATE write."
+                    ),
+                ))
+            else:
+                result.add_pass(
+                    f"Pitfall #7 (Alpaca): connect_alpaca in {fpath} — OK"
+                )
+
+    result.add_pass("Pitfall #7 (Alpaca): No connect_alpaca found (check not applicable)")
+
+
+def check_endpoint_response_field_consistency(py_files: List[str], jsx_files: List[str], result: AuditResult):
+    """
+    New check: Verify that list_wallets and /api/dashboard return the same set of
+    wallet fields. A drift between these two endpoints can cause the frontend to
+    work with one endpoint but break with the other.
+    """
+    list_wallets_fields: Set[str] = set()
+    dashboard_wallet_fields: Set[str] = set()
+
+    for fpath in py_files:
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+            continue
+        text = read_file(fpath)
+        file_lines = lines(text)
+
+        # Find list_wallets endpoint and extract returned field names
+        in_list_wallets = False
+        in_dashboard = False
+        brace_depth = 0
+
+        for i, line in enumerate(file_lines, 1):
+            if re.search(r"def\s+list_wallets\b", line):
+                in_list_wallets = True
+                in_dashboard = False
+                brace_depth = 0
+                continue
+            if re.search(r"def\s+get_dashboard\b", line):
+                in_dashboard = True
+                in_list_wallets = False
+                brace_depth = 0
+                continue
+
+            if in_list_wallets or in_dashboard:
+                # Track dict literals
+                brace_depth += line.count("{") - line.count("}")
+                # Extract field names from dict keys
+                field_matches = re.findall(r'"(\w+)":', line)
+                if in_list_wallets:
+                    list_wallets_fields.update(field_matches)
+                if in_dashboard:
+                    dashboard_wallet_fields.update(field_matches)
+
+                # End of function
+                if brace_depth <= 0 and ("return " in line or (line and not line[0].isspace() and (line.startswith("def ") or line.startswith("class ") or line.startswith("@app.")))):
+                    if in_list_wallets:
+                        in_list_wallets = False
+                    if in_dashboard:
+                        in_dashboard = False
+
+    if list_wallets_fields and dashboard_wallet_fields:
+        only_in_list = list_wallets_fields - dashboard_wallet_fields
+        only_in_dashboard = dashboard_wallet_fields - list_wallets_fields
+        # Filter out non-field noise (Python keywords, common dict keys)
+        noise = {"id", "return", "wallets", "wallet", "True", "False", "None", "str", "float", "int", "bool", "list", "dict", "await", "async", "def", "if", "else", "for", "in", "not", "and", "or", "is", "as", "with", "from", "import", "try", "except", "finally", "raise", "pass", "break", "continue", "yield", "lambda", "class", "return"}
+        only_in_list -= noise
+        only_in_dashboard -= noise
+
+        if only_in_list or only_in_dashboard:
+            result.add(Finding(
+                pitfall="field-drift",
+                severity="minor",
+                file="(multiple)",
+                line=1,
+                description=(
+                    f"list_wallets and /api/dashboard return different wallet field sets. "
+                    f"Only in list_wallets: {only_in_list}. "
+                    f"Only in dashboard: {only_in_dashboard}. "
+                    f"This can cause frontend inconsistencies if components switch endpoints."
+                ),
+                suggestion=(
+                    "Align the field sets between list_wallets and dashboard wallet_meta. "
+                    "Both endpoints should return the same wallet shape."
+                ),
+            ))
+        else:
+            result.add_pass(
+                "Field consistency: list_wallets and dashboard return aligned wallet field sets"
+            )
+    else:
+        result.add_pass(
+            "Field consistency: Could not extract field sets (endpoints not found in expected format)"
+        )
+
+
 def run_audit(base_path: str) -> AuditResult:
     result = AuditResult()
 
@@ -2603,6 +2865,9 @@ def run_audit(base_path: str) -> AuditResult:
     check_whale_score_in_dashboard(py_files, jsx_files, result)
     check_copy_trade_signals_performance_indexes(sql_files, result)
     check_concurrent_price_fetch(py_files, result)
+    check_get_me_jwt_created_at(py_files, result)
+    check_alpaca_validation_before_db(py_files, result)
+    check_endpoint_response_field_consistency(py_files, jsx_files, result)
 
     return result
 

@@ -131,7 +131,7 @@ async def stop_monitor() -> None:
         try:
             await asyncio.wait_for(_worker_task, timeout=10)
         except (asyncio.TimeoutError, asyncio.CancelledError):
-            _worker_task.cancel()
+            pass  # wait_for already cancelled the task; no need to cancel again
         except Exception:
             pass  # Suppress; this is shutdown
 
