@@ -34,12 +34,136 @@ function fmtBalance(wallet, currency) {
   return `$${value.toLocaleString()}`;
 }
 
+function ScoreBar({ label, value, color }) {
+  const pct = Math.round((value || 0) * 100);
+  return (
+    <div style={{ marginBottom: '10px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '3px' }}>
+        <span style={{ fontSize: '0.75rem', color: '#8b8f98' }}>{label}</span>
+        <span style={{ fontSize: '0.75rem', fontWeight: 600, color }}>{pct}%</span>
+      </div>
+      <div style={{ height: '6px', background: '#1e2230', borderRadius: '3px', overflow: 'hidden' }}>
+        <div style={{
+          height: '100%',
+          width: `${pct}%`,
+          background: `linear-gradient(90deg, ${color}88, ${color})`,
+          borderRadius: '3px',
+          transition: 'width 0.3s ease',
+        }} />
+      </div>
+    </div>
+  );
+}
+
+function ScoreModal({ scoreData, onClose }) {
+  if (!scoreData) return null;
+  const overallPct = Math.round((scoreData.score || 0) * 100);
+  const scoreColor = overallPct >= 70 ? '#c4b5fd' : overallPct >= 40 ? '#f59e0b' : '#8b8f98';
+  const subscores = [
+    { key: 'score_activity', label: 'Activity', color: '#14b8a6' },
+    { key: 'score_reliability', label: 'Reliability', color: '#3b82f6' },
+    { key: 'score_weight', label: 'Weight', color: '#8b5cf6' },
+    { key: 'score_recency', label: 'Recency', color: '#f59e0b' },
+    { key: 'score_diversity', label: 'Diversity', color: '#ef4444' },
+  ];
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()} style={{ width: '440px' }}>
+        <div className="modal-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>🐋 Whale Score Breakdown</span>
+          <button onClick={onClose} style={{
+            background: 'none', border: 'none', color: '#8b8f98', fontSize: '1.2rem', cursor: 'pointer', padding: '0 4px',
+          }}>✕</button>
+        </div>
+
+        {/* Wallet info */}
+        <div style={{ marginBottom: '16px', padding: '10px', background: '#1e2230', borderRadius: '6px' }}>
+          <div style={{ fontSize: '0.85rem', fontWeight: 600, color: '#e4e6eb', marginBottom: '4px' }}>
+            {scoreData.label || 'Unnamed Wallet'}
+          </div>
+          <div style={{ fontSize: '0.7rem', color: '#6b7280', fontFamily: 'monospace', wordBreak: 'break-all' }}>
+            {scoreData.address}
+          </div>
+          <div style={{ fontSize: '0.7rem', color: '#8b8f98', marginTop: '4px' }}>
+            {scoreData.chain?.toUpperCase()} · Balance: ${((scoreData.balance_usd || 0)).toLocaleString()}
+          </div>
+        </div>
+
+        {/* Overall score */}
+        <div style={{ textAlign: 'center', marginBottom: '20px' }}>
+          <div style={{ fontSize: '2.5rem', fontWeight: 700, color: scoreColor, lineHeight: 1 }}>
+            {overallPct}%
+          </div>
+          <div style={{ fontSize: '0.75rem', color: '#8b8f98', marginTop: '4px' }}>Overall Whale Score</div>
+          {scoreData.score_is_coldstart && (
+            <div style={{ fontSize: '0.7rem', color: '#f59e0b', marginTop: '6px' }}>
+              ⚡ Cold start — only {scoreData.score_signals_used || 0} signals available
+            </div>
+          )}
+        </div>
+
+        {/* Sub-scores */}
+        <div style={{ marginBottom: '16px' }}>
+          {subscores.map(s => (
+            <ScoreBar key={s.key} label={s.label} value={scoreData[s.key]} color={s.color} />
+          ))}
+        </div>
+
+        {/* Stats row */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px', marginBottom: '16px' }}>
+          <div style={{ padding: '8px', background: '#1e2230', borderRadius: '6px', textAlign: 'center' }}>
+            <div style={{ fontSize: '0.9rem', fontWeight: 600, color: '#e4e6eb' }}>
+              {scoreData.median_amount_30d != null ? `$${(scoreData.median_amount_30d / 1000).toFixed(1)}K` : '—'}
+            </div>
+            <div style={{ fontSize: '0.65rem', color: '#8b8f98' }}>Median Tx (30d)</div>
+          </div>
+          <div style={{ padding: '8px', background: '#1e2230', borderRadius: '6px', textAlign: 'center' }}>
+            <div style={{ fontSize: '0.9rem', fontWeight: 600, color: '#e4e6eb' }}>
+              {scoreData.execution_rate_30d != null ? `${(scoreData.execution_rate_30d * 100).toFixed(0)}%` : '—'}
+            </div>
+            <div style={{ fontSize: '0.65rem', color: '#8b8f98' }}>Execution Rate</div>
+          </div>
+          <div style={{ padding: '8px', background: '#1e2230', borderRadius: '6px', textAlign: 'center' }}>
+            <div style={{ fontSize: '0.9rem', fontWeight: 600, color: '#e4e6eb' }}>
+              {scoreData.score_signals_used != null ? scoreData.score_signals_used : '—'}
+            </div>
+            <div style={{ fontSize: '0.65rem', color: '#8b8f98' }}>Signals Used</div>
+          </div>
+        </div>
+
+        {/* DB comparison */}
+        {scoreData.db_stored_score != null && scoreData.db_stored_score > 0 && (
+          <div style={{
+            fontSize: '0.7rem', color: '#6b7280', textAlign: 'center', padding: '6px',
+            background: '#1e2230', borderRadius: '4px',
+          }}>
+            DB-stored score: {(scoreData.db_stored_score * 100).toFixed(0)}%
+            {scoreData.db_score_calculated_at && (
+              <span> · Calculated {new Date(scoreData.db_score_calculated_at).toLocaleString()}</span>
+            )}
+            {Math.abs(scoreData.db_stored_score - scoreData.score) > 0.05 && (
+              <span style={{ color: '#f59e0b' }}> — differs from live score</span>
+            )}
+          </div>
+        )}
+
+        <div className="modal-actions">
+          <button className="btn btn-secondary" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Wallets({ token, currency }) {
   const [wallets, setWallets] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [scoreModal, setScoreModal] = useState(null); // null or { walletId, walletLabel }
+  const [scoreData, setScoreData] = useState(null);
+  const [scoreLoading, setScoreLoading] = useState(false);
   const [form, setForm] = useState({
     address: '',
     chain: 'eth',
@@ -98,6 +222,26 @@ function Wallets({ token, currency }) {
     } catch (e) {
       alert(e.message);
     }
+  };
+
+  const handleViewScore = async (w) => {
+    setScoreModal({ walletId: w.id, walletLabel: w.label });
+    setScoreData(null);
+    setScoreLoading(true);
+    try {
+      const data = await apiFetch(`/wallets/${w.id}/score`, token);
+      setScoreData(data);
+    } catch (e) {
+      alert(`Failed to load score: ${e.message}`);
+      setScoreModal(null);
+    } finally {
+      setScoreLoading(false);
+    }
+  };
+
+  const closeScoreModal = () => {
+    setScoreModal(null);
+    setScoreData(null);
   };
 
   const addSuggestion = (s) => {
@@ -284,6 +428,15 @@ function Wallets({ token, currency }) {
                             Score: {(w.whale_score * 100).toFixed(0)}%
                           </span>
                         )}
+                        {w.whale_score != null && w.whale_score > 0 && (
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            style={{ fontSize: '0.65rem', padding: '1px 4px', marginLeft: '4px' }}
+                            onClick={() => handleViewScore(w)}
+                          >
+                            View
+                          </button>
+                        )}
                       </td>
                       <td className="time-ago">{new Date(w.created_at).toLocaleDateString()}</td>
                       <td>
@@ -301,6 +454,19 @@ function Wallets({ token, currency }) {
           </div>
         )}
       </div>
+
+      {/* Score detail modal */}
+      {scoreModal && (
+        scoreLoading ? (
+          <div className="modal-overlay">
+            <div className="modal" style={{ textAlign: 'center', padding: '40px' }}>
+              <div className="loading">Loading score breakdown...</div>
+            </div>
+          </div>
+        ) : (
+          <ScoreModal scoreData={scoreData} onClose={closeScoreModal} />
+        )
+      )}
     </div>
   );
 }
