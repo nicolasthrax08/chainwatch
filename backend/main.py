@@ -1681,6 +1681,10 @@ async def mirror_trade(
         else:
             notional_usd = min(equity * EQUITY_PCT, signal_amount_usd, MAX_MIRROR_NOTIONAL)
 
+        # Normalize 'receive' to 'buy' for Alpaca — both mean "acquiring asset"
+        # Defined here (before the if/else) so both branches can use it.
+        trade_side = "buy" if signal["action"] in ("buy", "receive") else "sell"
+
         if notional_usd >= MIN_NOTIONAL:
             # Check if asset supports fractional shares
             use_fractional = True
@@ -1699,8 +1703,6 @@ async def mirror_trade(
             except Exception as e:
                 logger.warning("Could not check fractionable for %s: %s — assuming fractional", symbol, e)
 
-            # Normalize 'receive' to 'buy' for Alpaca — both mean "acquiring asset"
-            trade_side = "buy" if signal["action"] in ("buy", "receive") else "sell"
             order_payload = {
                 "symbol": symbol,
                 "side": trade_side,
@@ -1756,7 +1758,7 @@ async def mirror_trade(
                 json={
                     "symbol": symbol,
                     "qty": "1",
-                    "side": "buy" if signal["action"] == "buy" else "sell",
+                    "side": trade_side,
                     "type": "market",
                     "time_in_force": "day",
                 },

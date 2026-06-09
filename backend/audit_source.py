@@ -2725,6 +2725,93 @@ def check_alpaca_validation_before_db(py_files: List[str], result: AuditResult):
     result.add_pass("Pitfall #7 (Alpaca): No connect_alpaca found (check not applicable)")
 
 
+def check_mirror_trade_action_normalization(py_files: List[str], result: AuditResult):
+    """
+    New check: Verify that the mirror_trade endpoint normalizes signal action
+    ('buy'/'receive' → 'buy') consistently for BOTH the fractional and qty=1
+    Alpaca order code paths.
+
+    Bug pattern: The fractional path uses trade_side = "buy" if signal["action"]
+    in ("buy", "receive") else "sell", but the qty=1 fallback used
+    "buy" if signal["action"] == "buy" else "sell" — which sends "sell" for
+    "receive" actions, causing an incorrect short sell instead of a buy.
+
+    Detection: Look for the qty=1 fallback json block inside mirror_trade and
+    verify it references the same normalized trade_side variable rather than
+    re-implementing the normalization inline with a different condition.
+    """
+    MIRROR_TRADE_PATTERN = re.compile(r"mirror_trade|/api/signals/.*mirror")
+    QTY_FALLBACK_PATTERN = re.compile(r"qty.*[\"']1[\"']|notional_below|MIN_NOTIONAL")
+    INLINE_NORMALIZATION = re.compile(
+        r"buy[\"'].*signal\[.action.\].*==.*buy"
+        r"|signal\[.action.\].*==.*buy.*buy"
+    )
+
+    for fpath in py_files:
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+            continue
+        text = read_file(fpath)
+        if "mirror_trade" not in text and "/api/signals" not in text:
+            continue
+        if "mirror" not in text.lower():
+            continue
+
+        file_lines = lines(text)
+        found_fallback_block = False
+        has_inline_normalization = False
+        has_trade_side_var = False
+        in_mirror_func = False
+        mirror_line = 0
+
+        for i, line in enumerate(file_lines, 1):
+            if "async def mirror_trade" in line:
+                in_mirror_func = True
+                mirror_line = i
+                continue
+            if in_mirror_func:
+                # Detect qty=1 fallback block
+                if "qty" in line and ("\"1\"" in line or "'1'" in line):
+                    found_fallback_block = True
+                # Check if fallback uses inline normalization (bug pattern)
+                if found_fallback_block and INLINE_NORMALIZATION.search(line):
+                    has_inline_normalization = True
+                # Check if fallback uses trade_side variable (correct pattern)
+                if found_fallback_block and "trade_side" in line:
+                    has_trade_side_var = True
+                # Stop tracking when we leave the fallback block
+                if found_fallback_block and "response.raise_for_status" in line:
+                    found_fallback_block = False
+
+        if has_inline_normalization and not has_trade_side_var:
+            result.add(Finding(
+                pitfall="mirror_trade action normalization mismatch",
+                severity="critical",
+                file=fpath,
+                line=mirror_line,
+                description=(
+                    "The qty=1 fallback in mirror_trade re-implements action→side "
+                    "normalization inline with a DIFFERENT condition than the "
+                    "fractional path. Signal action 'receive' would be sent as "
+                    "'sell' instead of 'buy' for small orders."
+                ),
+                suggestion=(
+                    "Define trade_side once (before the if/else) and use it in "
+                    "both the fractional and qty=1 order payloads: "
+                    "trade_side = 'buy' if signal['action'] in ('buy', 'receive') else 'sell'"
+                ),
+            ))
+        elif has_trade_side_var or (not has_inline_normalization):
+            result.add_pass(
+                f"mirror_trade action normalization in {fpath} — OK "
+                f"(uses consistent trade_side variable in both code paths)"
+            )
+
+    # If we never found mirror_trade in any file, report pass
+    if not any("mirror_trade" in read_file(f) for f in py_files
+               if not f.endswith(("audit_source.py", "check_migration_status.py"))):
+        result.add_pass("mirror_trade action normalization — no mirror_trade found (check not applicable)")
+
+
 def check_portfolio_change_delta_consistency(py_files: List[str], result: AuditResult):
     """
     New check (Cycle 12): Verify that portfolio_change alert rule's delta_sum
@@ -3077,6 +3164,7 @@ def run_audit(base_path: str) -> AuditResult:
     check_concurrent_price_fetch(py_files, result)
     check_get_me_jwt_created_at(py_files, result)
     check_alpaca_validation_before_db(py_files, result)
+    check_mirror_trade_action_normalization(py_files, result)
     check_portfolio_change_delta_consistency(py_files, result)
     check_endpoint_response_field_consistency(py_files, jsx_files, result)
 
