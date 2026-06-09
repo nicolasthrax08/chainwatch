@@ -89,7 +89,8 @@ async def evaluate_alerts(
 
     rows = await conn.fetch(
         """
-        SELECT a.id, a.user_id, a.rule_type, a.threshold, a.last_fired_at
+        SELECT a.id, a.user_id, a.rule_type, a.threshold, a.last_fired_at,
+               a.notify_telegram
         FROM alerts a
         WHERE a.enabled = TRUE
           AND a.user_id = ANY($1)
@@ -179,6 +180,7 @@ async def evaluate_alerts(
                                 "threshold": threshold,
                                 "trigger_value": tx_usd,
                                 "message": f"Large transaction: {token} ${tx_usd:,.0f}",
+                                "notify_telegram": alert.get("notify_telegram", True),
                             })
                             break  # One fire per alert per cycle
 
@@ -211,6 +213,7 @@ async def evaluate_alerts(
                                 "threshold": threshold,
                                 "trigger_value": tx_usd,
                                 "message": f"Whale buy: {token} ${tx_usd:,.0f}",
+                                "notify_telegram": alert.get("notify_telegram", True),
                             })
                             break
 
@@ -247,6 +250,7 @@ async def evaluate_alerts(
                             "threshold": threshold,
                             "trigger_value": round(pct_change, 2),
                             "message": f"Portfolio changed {pct_change:.1f}% (threshold: {threshold}%)",
+                            "notify_telegram": alert.get("notify_telegram", True),
                         })
 
             elif rule_type == "balance_drop":
@@ -376,6 +380,9 @@ async def evaluate_alerts(
         import asyncio as _asyncio_mod
 
         for f in fired:
+            # Per-alert opt-in: skip if this alert has notify_telegram = FALSE
+            if not f.get("notify_telegram", True):
+                continue
             chat_id = tg_chat_map.get(str(f["user_id"]))
             if not chat_id:
                 continue
