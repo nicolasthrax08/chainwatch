@@ -1,17 +1,17 @@
 [
   {
+    "task_type": "review_thresholds",
+    "payload": "Revisit MAX_CONSECUTIVE_ERRORS (5 to 8) for RPC resilience. This has been deferred for two cycles — should be reviewed when production RPC reliability data is available.",
+    "status": "pending"
+  },
+  {
     "task_type": "audit_outputs",
-    "payload": "Verify the new /api/wallets/{wallet_id}/score endpoint works correctly after deploy. Test with a known whale wallet and verify the score breakdown matches the stored whale_score in the database.",
+    "payload": "After DB is restored in production, verify that phase timing data appears correctly in the /api/health response. Check that phase_durations_s is present in the cycle stats history.",
     "status": "pending"
   },
   {
     "task_type": "write_tool",
-    "payload": "Add a frontend component to display the whale score breakdown (all 5 sub-scores) in the wallet detail view. The backend endpoint GET /api/wallets/{wallet_id}/score now returns all scoring data needed.",
-    "status": "pending"
-  },
-  {
-    "task_type": "review_thresholds",
-    "payload": "Review whether MAX_CONSECUTIVE_ERRORS=5 should be raised to 8 for better RPC outage tolerance. This was deferred in a previous cycle — revisit now that the app has been running and we may have RPC reliability data.",
+    "payload": "Add a frontend component to display the whale score breakdown (all 5 sub-scores) in the wallet detail view. The backend endpoint GET /api/wallets/{wallet_id}/score returns all scoring data needed. The ScoreModal component already exists in Walleys.jsx — this task is about surfacing it more prominently.",
     "status": "pending"
   }
 ]

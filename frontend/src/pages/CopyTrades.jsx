@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { API_BASE } from '../config';
 import { ChainBadge } from '../App';
 
@@ -37,7 +37,22 @@ const STATUS_COLORS = {
   pending: '#f59e0b',
   executed: '#10b981',
   failed: '#ef4444',
+  stale: '#6b7280',
 };
+
+function truncateAddress(addr) {
+  if (!addr) return '—';
+  return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+}
+
+function fmtDuration(seconds) {
+  if (!seconds && seconds !== 0) return '—';
+  const s = Math.round(seconds);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+}
 
 function AnalyzeModal({ signal, currency, onMirror, onClose }) {
   if (!signal) return null;
@@ -78,7 +93,7 @@ function AnalyzeModal({ signal, currency, onMirror, onClose }) {
 
         {[
           ['Whale', signal.wallet_label],
-          ['Address', signal.wallet_address ? `${signal.wallet_address.slice(0, 6)}...${signal.wallet_address.slice(-4)}` : '—'],
+          ['Address', signal.wallet_address ? truncateAddress(signal.wallet_address) : '—'],
           ['Amount', fmtTotal(signal.amount_usd, currency)],
           ['Confidence', `${(signal.confidence_score * 100).toFixed(0)}%`],
           ['Final Confidence', `${(signal.confidence_final * 100).toFixed(0)}%`],
@@ -164,10 +179,229 @@ function SignalsEmptyState() {
   );
 }
 
+function SignalStats({ token }) {
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const data = await apiFetch('/signals/stats', token);
+        if (!cancelled) setStats(data);
+      } catch (e) {
+        // Silently fail — stats are optional enrichment
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    const interval = setInterval(load, 30000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [token]);
+
+  if (loading || !stats || stats.total_signals === 0) return null;
+
+  const executionRatePct = (stats.execution_rate * 100).toFixed(1);
+  const avgConfPct = (stats.avg_confidence * 100).toFixed(0);
+  const avgWhaleScorePct = (stats.avg_whale_score * 100).toFixed(0);
+
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+      gap: '12px',
+      marginBottom: '20px',
+    }}>
+      {[
+        { label: 'Total Signals', value: stats.total_signals, color: '#8b5cf6' },
+        { label: 'Execution Rate', value: `${executionRatePct}%`, color: '#10b981' },
+        { label: 'Avg Confidence', value: `${avgConfPct}%`, color: '#f59e0b' },
+        { label: 'Avg Whale Score', value: `${avgWhaleScorePct}%`, color: '#c4b5fd' },
+        { label: 'Pending', value: stats.by_status.pending, color: '#f59e0b' },
+        { label: 'Executed', value: stats.by_status.executed, color: '#10b981' },
+        { label: 'Signals (7d)', value: stats.recent_signals.last_7d, color: '#6b7280' },
+      ].map(({ label, value, color }) => (
+        <div key={label} style={{
+          background: '#13141a',
+          border: '1px solid rgba(255,255,255,0.06)',
+          borderRadius: '8px',
+          padding: '12px 14px',
+        }}>
+          <div style={{ fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>{label}</div>
+          <div style={{ fontSize: '18px', fontWeight: 700, color }}>{value}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SignalHistory({ token, currency }) {
+  const [history, setHistory] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [filter, setFilter] = useState('all');
+  const [expanded, setExpanded] = useState(false);
+
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      const params = new URLSearchParams({ limit: '50' });
+      if (filter !== 'all') params.set('status_filter', filter);
+      const data = await apiFetch(`/signals/history?${params}`, token);
+      setHistory(data.signals || []);
+    } catch (e) {
+      setError(e.message || 'Failed to load signal history');
+    } finally {
+      setLoading(false);
+    }
+  }, [token, filter]);
+
+  useEffect(() => {
+    load();
+    const interval = setInterval(load, 60000);
+    return () => clearInterval(interval);
+  }, [load]);
+
+  const summary = useMemo(() => {
+    const counts = { executed: 0, failed: 0, stale: 0 };
+    let totalTtc = 0;
+    let ttcCount = 0;
+    for (const s of history) {
+      if (counts[s.status] !== undefined) counts[s.status]++;
+      if (s.time_to_close_seconds > 0) {
+        totalTtc += s.time_to_close_seconds;
+        ttcCount++;
+      }
+    }
+    return {
+      total: history.length,
+      ...counts,
+      avgTtc: ttcCount > 0 ? totalTtc / ttcCount : 0,
+    };
+  }, [history]);
+
+  return (
+    <div className="card" style={{ marginTop: '16px' }}>
+      <div
+        className="card-title"
+        style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
+        onClick={() => setExpanded(e => !e)}
+      >
+        <span>
+          Signal History
+          {!loading && !error && history.length > 0 && (
+            <span style={{ fontSize: '0.75rem', color: '#6b7280', fontWeight: 400, marginLeft: '8px' }}>
+              {summary.total} closed
+            </span>
+          )}
+        </span>
+        <span style={{ fontSize: '0.75rem', color: '#8b8f98' }}>{expanded ? '▾' : '▸'}</span>
+      </div>
+
+      {!expanded && summary.total > 0 && (
+        <div style={{ display: 'flex', gap: '16px', padding: '8px 0', fontSize: '0.8rem', color: '#8b8f98' }}>
+          <span style={{ color: '#10b981' }}>✓ {summary.executed} executed</span>
+          <span style={{ color: '#ef4444' }}>✗ {summary.failed} failed</span>
+          <span style={{ color: '#6b7280' }}>⊘ {summary.stale} stale</span>
+          {summary.avgTtc > 0 && <span>⏱ avg {fmtDuration(summary.avgTtc)}</span>}
+        </div>
+      )}
+
+      {expanded && (
+        <div style={{ marginTop: '12px' }}>
+          <div style={{ display: 'flex', gap: '4px', marginBottom: '12px' }}>
+            {['all', 'executed', 'failed', 'stale'].map(f => (
+              <button
+                key={f}
+                className={`btn btn-sm ${filter === f ? 'btn-primary' : 'btn-secondary'}`}
+                style={{ fontSize: '0.75rem', padding: '3px 10px', textTransform: 'capitalize' }}
+                onClick={() => { setFilter(f); setLoading(true); }}
+              >
+                {f === 'all' ? `All (${summary.total})` : `${f} (${summary[f] || 0})`}
+              </button>
+            ))}
+          </div>
+
+          {loading && <div style={{ color: '#8b8f98', fontSize: '0.85rem', padding: '16px 0' }}>Loading history…</div>}
+
+          {error && (
+            <div style={{ color: '#ef4444', fontSize: '0.85rem', padding: '16px 0' }}>
+              ⚠️ {error}
+              <button className="btn btn-secondary btn-sm" style={{ marginLeft: '8px' }} onClick={() => { setLoading(true); load(); }}>
+                Retry
+              </button>
+            </div>
+          )}
+
+          {!loading && !error && history.length === 0 && (
+            <div style={{ textAlign: 'center', padding: '24px', color: '#6b7280', fontSize: '0.85rem' }}>
+              No closed signals yet. Signals will appear here after they are executed, marked as failed, or expire.
+            </div>
+          )}
+
+          {!loading && !error && history.length > 0 && (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.08)', color: '#6b7280', textAlign: 'left' }}>
+                    <th style={{ padding: '6px 8px', fontWeight: 500 }}>Token</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 500 }}>Action</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 500 }}>Amount</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 500 }}>Whale</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 500 }}>Conf.</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 500 }}>Final</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 500 }}>Status</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 500 }}>Time to Close</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 500 }}>Closed</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.map(s => (
+                    <tr key={s.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
+                      <td style={{ padding: '6px 8px', fontWeight: 600, color: '#e2e8f0' }}>{s.token_symbol}</td>
+                      <td style={{ padding: '6px 8px' }}>
+                        <span style={{
+                          fontSize: '0.7rem', fontWeight: 600, padding: '1px 5px', borderRadius: '3px',
+                          background: s.action === 'buy' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)',
+                          color: s.action === 'buy' ? '#10b981' : '#ef4444',
+                        }}>{s.action.toUpperCase()}</span>
+                      </td>
+                      <td style={{ padding: '6px 8px', color: '#c4b5fd' }}>{fmtTotal(s.amount_usd, currency)}</td>
+                      <td style={{ padding: '6px 8px', color: '#8b8f98', maxWidth: '100px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={s.wallet_address}>
+                        {s.wallet_label || truncateAddress(s.wallet_address)}
+                      </td>
+                      <td style={{ padding: '6px 8px', color: s.confidence_score > 0.7 ? '#10b981' : '#f59e0b' }}>
+                        {(s.confidence_score * 100).toFixed(0)}%
+                      </td>
+                      <td style={{ padding: '6px 8px', color: s.confidence_final > 0.7 ? '#10b981' : '#f59e0b' }}>
+                        {(s.confidence_final * 100).toFixed(0)}%
+                      </td>
+                      <td style={{ padding: '6px 8px' }}>
+                        <span style={{
+                          fontSize: '0.7rem', fontWeight: 600, padding: '1px 5px', borderRadius: '3px',
+                          background: `${STATUS_COLORS[s.status] || '#6b7280'}22`,
+                          color: STATUS_COLORS[s.status] || '#6b7280',
+                        }}>{s.status}</span>
+                      </td>
+                      <td style={{ padding: '6px 8px', color: '#8b8f98' }}>{fmtDuration(s.time_to_close_seconds)}</td>
+                      <td style={{ padding: '6px 8px', color: '#6b7280', fontSize: '0.7rem' }}>{timeAgo(s.closed_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CopyTrades({ token, currency }) {
   const [signals, setSignals] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);  // Finding: no error state, shows empty on failure
+  const [error, setError] = useState(null);
   const [mirroring, setMirroring] = useState(null);
   const [analyzeSignal, setAnalyzeSignal] = useState(null);
 
@@ -177,7 +411,7 @@ function CopyTrades({ token, currency }) {
       const data = await apiFetch('/signals', token);
       setSignals(data.signals || []);
     } catch (e) {
-      setError(e.message || 'Failed to load signals');  // Finding: was only console.error
+      setError(e.message || 'Failed to load signals');
     } finally {
       setLoading(false);
     }
@@ -207,7 +441,6 @@ function CopyTrades({ token, currency }) {
 
   if (loading) return <div className="loading">Loading signals</div>;
 
-  // Finding: error display with retry button
   if (error) return (
     <div style={{ textAlign: 'center', padding: '40px', color: '#ef4444' }}>
       <p>⚠️ {error}</p>
@@ -220,6 +453,10 @@ function CopyTrades({ token, currency }) {
   return (
     <div>
       <h1 style={{ fontSize: '1.5rem', marginBottom: '24px', color: '#8b5cf6' }}>◑ Copy Trade Signals</h1>
+
+      {/* Signal Performance Stats Widget */}
+      <SignalStats token={token} />
+
       <div className="card">
         <div className="card-title">
           Whale trade signals
@@ -248,7 +485,7 @@ function CopyTrades({ token, currency }) {
                   <div className="signal-meta">{s.wallet_label} · {fmtTotal(s.amount_usd, currency)} · {timeAgo(s.created_at)}</div>
                   {s.wallet_address && (
                     <div style={{ fontSize: '11px', color: '#6b7280', fontFamily: 'monospace', marginTop: '2px' }}>
-                      {s.wallet_address.slice(0, 6)}...{s.wallet_address.slice(-4)}
+                      {truncateAddress(s.wallet_address)}
                     </div>
                   )}
                   {s.explanation && (
@@ -309,6 +546,9 @@ function CopyTrades({ token, currency }) {
           </div>
         )}
       </div>
+
+      {/* Signal History (closed signals) */}
+      <SignalHistory token={token} currency={currency} />
 
       <div className="card" style={{ background: 'rgba(139,92,246,0.05)', marginTop: '16px' }}>
         <div className="card-title">How copy trading works</div>

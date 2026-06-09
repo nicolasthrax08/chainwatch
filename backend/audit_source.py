@@ -3485,6 +3485,72 @@ def check_duplicate_cycle_stats(py_files: List[str], result: AuditResult):
         # count == 0: not the monitor file, skip
 
 
+def check_signal_history_frontend(jsx_files: List[str], result: AuditResult):
+    """Check that SignalHistory component exists and uses /api/signals/history."""
+    found_component = False
+    found_endpoint_usage = False
+    found_stale_filter = False
+    found_status_colors_stale = False
+
+    for fpath in jsx_files:
+        with open(fpath, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        if "function SignalHistory" in content or "const SignalHistory" in content:
+            found_component = True
+            rel = fpath.replace(os.getcwd() + os.sep, "").replace(os.getcwd(), ".")
+            # Check it fetches from the history endpoint
+            if "/signals/history" in content:
+                found_endpoint_usage = True
+            # Check it has stale filter support
+            if "'stale'" in content and ("status_filter" in content or "filter" in content):
+                found_stale_filter = True
+
+        # Check STATUS_COLORS has stale entry
+        if "STATUS_COLORS" in content and "stale" in content:
+            found_status_colors_stale = True
+
+    if found_component:
+        result.passed.append("SignalHistory frontend: component exists")
+    else:
+        result.minor.append(AuditFinding(
+            pitfall="SignalHistory frontend component missing",
+            file="(jsx files)", line=0,
+            description="No SignalHistory component found in JSX files. The /api/signals/history backend endpoint exists but has no frontend consumer.",
+            suggestion="Add a SignalHistory component that fetches /api/signals/history and displays closed signals in a table."
+        ))
+
+    if found_endpoint_usage:
+        result.passed.append("SignalHistory frontend: uses /api/signals/history endpoint")
+    elif found_component:
+        result.minor.append(AuditFinding(
+            pitfall="SignalHistory not using history endpoint",
+            file="(jsx files)", line=0,
+            description="SignalHistory component exists but does not fetch /api/signals/history.",
+            suggestion="Ensure SignalHistory fetches from /api/signals/history?limit=50 with optional status_filter param."
+        ))
+
+    if found_stale_filter:
+        result.passed.append("SignalHistory frontend: supports stale filter")
+    elif found_component:
+        result.minor.append(AuditFinding(
+            pitfall="SignalHistory missing stale filter",
+            file="(jsx files)", line=0,
+            description="SignalHistory component does not filter by 'stale' status.",
+            suggestion="Add filter tabs for all/executed/failed/stale to the SignalHistory component."
+        ))
+
+    if found_status_colors_stale:
+        result.passed.append("STATUS_COLORS: has stale color entry")
+    else:
+        result.minor.append(AuditFinding(
+            pitfall="STATUS_COLORS missing stale entry",
+            file="(jsx files)", line=0,
+            description="STATUS_COLORS constant does not include a 'stale' key. Stale signals will have no color in signal cards.",
+            suggestion="Add stale: '#6b7280' to STATUS_COLORS."
+        ))
+
+
 def run_audit(base_path: str) -> AuditResult:
     result = AuditResult()
 
@@ -3551,6 +3617,7 @@ def run_audit(base_path: str) -> AuditResult:
     check_stale_signal_expiry(py_files, result)
     check_signal_history_endpoint(py_files, result)
     check_duplicate_cycle_stats(py_files, result)
+    check_signal_history_frontend(jsx_files, result)
 
     return result
 
