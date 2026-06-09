@@ -219,8 +219,20 @@ async def _poll_all_wallets_inner() -> None:
     _signals_generated = 0
     _alerts_fired = 0
     _errors = 0
+    _phase_durations: dict = {}  # phase_name → seconds
+
+    def _phase_elapsed() -> float:
+        """Seconds since start of poll cycle."""
+        return _time_mod.monotonic() - _cycle_t0
+
+    def _phase_split(phase_name: str) -> float:
+        """Record duration of the phase that just ended. Returns phase duration."""
+        dur = _phase_elapsed()
+        _phase_durations[phase_name] = round(dur, 3)
+        return dur
 
     # ── Phase 1: Read all wallets (short-held connection) ────────────
+    _phase_t0 = _time_mod.monotonic()
     async with _pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT w.id, w.address, w.chain, w.balance_native, w.balance_usd,
@@ -228,6 +240,7 @@ async def _poll_all_wallets_inner() -> None:
             FROM wallets w
             ORDER BY w.chain, w.address
         """)
+    _phase_durations["phase1_read_wallets"] = round(_time_mod.monotonic() - _phase_t0, 3)
 
     if not rows:
         # Even with no wallets, prune stale state
@@ -239,6 +252,7 @@ async def _poll_all_wallets_inner() -> None:
     _wallets_processed = len(rows)
 
     # ── Phase 2: Prune stale state entries (F2 fix) ──────────────────
+    _phase_t0 = _time_mod.monotonic()
     current_ids: Set[str] = {str(r["id"]) for r in rows}
     async with _state_lock:
         for wid in list(_last_balances.keys()):
@@ -250,13 +264,17 @@ async def _poll_all_wallets_inner() -> None:
         for wid in list(_consecutive_errors.keys()):
             if wid not in current_ids:
                 del _consecutive_errors[wid]
+    _phase_durations["phase2_prune_state"] = round(_time_mod.monotonic() - _phase_t0, 3)
 
     # ── Phase 3: Process wallets concurrently ────────────────────────
+    _phase_t0 = _time_mod.monotonic()
     sem = asyncio.Semaphore(MAX_CONCURRENT_WALLETS)
     tasks = [_check_wallet_with_sem(sem, row) for row in rows]
     results = await asyncio.gather(*tasks, return_exceptions=True)
+    _phase_durations["phase3_fetch_wallets"] = round(_time_mod.monotonic() - _phase_t0, 3)
 
     # ── Phase 4: Collect changes (F1 fix: store chain in tuple) ───────
+    _phase_t0 = _time_mod.monotonic()
     # Each entry: (wid, address, chain, is_whale, is_mine, user_id, result)
     # result = (balance_native, balance_usd, new_tx_hash, tx_type, token, tx_amount_native)
     changed_wallets = []
@@ -280,8 +298,10 @@ async def _poll_all_wallets_inner() -> None:
                 result,
             ))
     _wallets_changed = len(changed_wallets)
+    _phase_durations["phase4_collect_changes"] = round(_time_mod.monotonic() - _phase_t0, 3)
 
     # ── Phase 5: Batch-update changed wallets (single transaction) ───
+    _phase_t0 = _time_mod.monotonic()
     # Also capture prev_balance_usd for each wallet for Phase 6 alert eval
     _prev_balance_map: dict = {}  # wid → prev_balance_usd
     if changed_wallets:
@@ -348,9 +368,11 @@ async def _poll_all_wallets_inner() -> None:
                             f"  → Stored new tx for {addr[:12]}…: "
                             f"{tx_type} {tx_amount_native} {token} ({chain})"
                         )
+    _phase_durations["phase5_batch_update"] = round(_time_mod.monotonic() - _phase_t0, 3)
 
     # ── Phase 6: Signal generation + alert evaluation (separate connection,
     #            outside Phase 5 transaction to avoid rollback coupling) ───
+    _phase_t0 = _time_mod.monotonic()
     if changed_wallets:
         # Collect distinct user_ids from the changed set
         changed_user_ids = list({uid for _, _, _, _, _, uid, _ in changed_wallets})
@@ -564,6 +586,7 @@ async def _poll_all_wallets_inner() -> None:
                 logger.debug(
                     f"Could not WS-push signal to user {ws_user_id}"
                 )
+    _phase_durations["phase6_signals_alerts"] = round(_time_mod.monotonic() - _phase_t0, 3)
 
     # ── Record cycle statistics ─────────────────────────────────────────
     _last_cycle_duration = _time_mod.monotonic() - _cycle_t0
@@ -575,16 +598,30 @@ async def _poll_all_wallets_inner() -> None:
         "signals_generated": _signals_generated,
         "alerts_fired": _alerts_fired,
         "errors": _errors,
+        "phase_durations_s": _phase_durations,
     }
     async with _cycle_stats_lock:
         _cycle_stats.append(_entry)
         while len(_cycle_stats) > _MAX_CYCLE_HISTORY:
             _cycle_stats.pop(0)
+
+    # ── Per-phase timing log (INFO if any phase exceeds threshold) ──────
+    _PHASE_WARN_THRESHOLD_S = 5.0  # warn if any phase takes >5s
+    _slow_phases = {
+        k: v for k, v in _phase_durations.items() if v > _PHASE_WARN_THRESHOLD_S
+    }
+    if _slow_phases:
+        logger.warning(
+            "Monitor cycle SLOW phases: %s (total %.1fs)",
+            ", ".join(f"{k}={v}s" for k, v in _slow_phases.items()),
+            _last_cycle_duration,
+        )
     logger.info(
         "Monitor cycle complete: %.1fs, %d/%d wallets changed, "
-        "%d signals, %d alerts, %d errors",
+        "%d signals, %d alerts, %d errors | phases: %s",
         _last_cycle_duration, _wallets_changed, _wallets_processed,
         _signals_generated, _alerts_fired, _errors,
+        ", ".join(f"{k}={v}s" for k, v in _phase_durations.items()),
     )
 
 
