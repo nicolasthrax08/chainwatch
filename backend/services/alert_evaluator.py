@@ -25,6 +25,15 @@ _COOLDOWN_PRUNE_INTERVAL = 600  # prune every 10 minutes
 _last_cooldown_prune: float = 0.0
 
 
+async def _send_tg_safe(chat_id: str, message: str) -> None:
+    """Send a Telegram alert, swallowing all errors (fire-and-forget)."""
+    try:
+        from services.telegram_alerts import send_telegram_alert
+        await send_telegram_alert(message, chat_id=chat_id)
+    except Exception:
+        pass  # Never let Telegram failures affect alerting
+
+
 def _prune_cooldown_cache() -> None:
     """Remove expired cooldown entries to prevent unbounded memory growth (Pitfall #12)."""
     import time
@@ -273,7 +282,22 @@ async def evaluate_alerts(
     # Persist fired alerts and update cooldowns
     # Batch INSERT all fired alerts, then batch UPDATE last_fired_at (Pitfall #16).
     persisted = []
+    # Telegram chat ID map: user_id → chat_id (populated only when alerts fire)
+    tg_chat_map: dict = {}
     if fired:
+        # ── Fetch Telegram chat IDs for users with alerts firing ─────────
+        # Batch fetch to avoid N+1 queries (Pitfall #16).
+        tg_user_ids = list({f["user_id"] for f in fired})
+        tg_chat_map: dict = {}
+        try:
+            telegram_rows = await conn.fetch(
+                "SELECT id, telegram_chat_id FROM users WHERE id = ANY($1) AND telegram_chat_id IS NOT NULL",
+                tg_user_ids,
+            )
+            tg_chat_map = {str(r["id"]): r["telegram_chat_id"] for r in telegram_rows}
+        except Exception as e:
+            logger.warning("Failed to fetch Telegram chat IDs: %s", e)
+
         # Batch INSERT fired_alerts
         fa_alert_ids = [f["alert_id"] for f in fired]
         fa_user_ids = [f["user_id"] for f in fired]
@@ -343,5 +367,25 @@ async def evaluate_alerts(
             "Alert fired: alert=%s user=%s rule=%s",
             f["alert_id"], f["user_id"], f["rule_type"],
         )
+
+    # ── Send Telegram notifications (outside DB connection scope) ───────
+    # Pitfall #7: Telegram HTTP calls must NOT be made while holding a DB
+    # connection. The DB conn is released by the caller after this function
+    # returns, so we schedule Telegram sends as fire-and-forget tasks.
+    if tg_chat_map:
+        import asyncio as _asyncio_mod
+
+        for f in fired:
+            chat_id = tg_chat_map.get(str(f["user_id"]))
+            if not chat_id:
+                continue
+            msg = f.get("message", f"Alert: {f['rule_type']} triggered")
+            formatted = (
+                f"🔔 <b>ChainWatch Alert</b>\n\n{msg}\n\n"
+                f"Rule: {f['rule_type']}\n"
+                f"Threshold: {f['threshold']}\n"
+                f"Value: {f['trigger_value']}"
+            )
+            _asyncio_mod.create_task(_send_tg_safe(chat_id, formatted))
 
     return persisted

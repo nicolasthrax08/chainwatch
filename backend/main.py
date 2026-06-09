@@ -163,6 +163,11 @@ app.add_middleware(
 # Database pool
 db_pool: Optional[asyncpg.Pool] = None
 
+# ─── Metrics Middleware ───────────────────────────────────────────────
+# Must be added early so it captures all downstream endpoints.
+from services.metrics_middleware import MetricsMiddleware  # noqa: E402
+app.add_middleware(MetricsMiddleware)
+
 
 @app.on_event("startup")
 async def startup():
@@ -196,6 +201,10 @@ async def startup():
             command_timeout=30
         )
         _log_startup_event("db_pool_created", f"min_size=2 max_size=10")
+        # Instrument the pool for query metrics
+        from services.instrumented_pool import instrument_pool
+        instrument_pool(db_pool)
+        _log_startup_event("db_pool_instrumented")
     except Exception as e:
         logger.warning(f"Failed to create DB pool on startup: {e}. API endpoints requiring DB will return 503.")
         _log_startup_event("db_pool_failed", str(e))
@@ -383,11 +392,13 @@ class AlertRequest(BaseModel):
     rule_type: str = Field(..., max_length=50)
     threshold: float = Field(default=0.0, ge=0, le=1000000)
     enabled: bool = True
+    notify_telegram: bool = True
 
 
 class AlertUpdateRequest(BaseModel):
     threshold: Optional[float] = None
     enabled: Optional[bool] = None
+    notify_telegram: Optional[bool] = None
 
 
 class AlpacaConnectRequest(BaseModel):
@@ -578,6 +589,40 @@ async def disconnect_alpaca(
             user["id"],
         )
     return {"disconnected": True}
+
+
+# ─── Telegram Notification Settings ─────────────────────────────────
+
+class TelegramSettingsRequest(BaseModel):
+    chat_id: str = Field(..., max_length=64, description="Telegram chat ID for notifications")
+
+
+@app.post("/api/user/telegram")
+async def set_telegram_chat_id(
+    req: TelegramSettingsRequest,
+    user: dict = Depends(get_current_user),
+):
+    """Set the Telegram chat ID for alert notifications."""
+    async with acquire_db() as conn:
+        await conn.execute(
+            "UPDATE users SET telegram_chat_id = $1 WHERE id = $2",
+            req.chat_id.strip(),
+            user["id"],
+        )
+    return {"telegram_configured": True}
+
+
+@app.delete("/api/user/telegram")
+async def clear_telegram_chat_id(
+    user: dict = Depends(get_current_user),
+):
+    """Remove the Telegram chat ID (disable Telegram notifications)."""
+    async with acquire_db() as conn:
+        await conn.execute(
+            "UPDATE users SET telegram_chat_id = NULL WHERE id = $1",
+            user["id"],
+        )
+    return {"telegram_configured": False}
 
 
 @app.get("/api/user/alpaca/status")
@@ -1341,14 +1386,15 @@ async def create_alert(
     async with acquire_db() as conn:
         alert = await conn.fetchrow(
             """
-            INSERT INTO alerts (user_id, rule_type, threshold, enabled)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO alerts (user_id, rule_type, threshold, enabled, notify_telegram)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING *
             """,
             user["id"],
             req.rule_type,
             req.threshold,
-            req.enabled
+            req.enabled,
+            req.notify_telegram,
         )
     return {
         "alert": {
@@ -1356,7 +1402,8 @@ async def create_alert(
             "rule_type": alert["rule_type"],
             "threshold": float(alert["threshold"] or 0),
             "enabled": alert["enabled"],
-            "created_at": alert["created_at"].isoformat()
+            "notify_telegram": alert.get("notify_telegram", True),
+            "created_at": alert["created_at"].isoformat(),
         }
     }
 
@@ -2277,6 +2324,19 @@ async def health_startup_log():
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "entries": _get_startup_log_entries(),
     })
+
+
+# ─── Application Metrics ─────────────────────────────────────────────
+
+@app.get("/api/health/metrics")
+async def health_metrics():
+    """
+    Application-level metrics: request counts, error rates, DB query stats,
+    and per-endency latency percentiles. Useful for dashboards and alerting.
+    Resets on restart (in-memory only — no persistent time-series).
+    """
+    from services.health_metrics import get_metrics
+    return JSONResponse(content=get_metrics())
 
 
 # ─── Whale Scorer Diagnostic ─────────────────────────────────────────

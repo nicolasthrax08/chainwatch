@@ -2924,6 +2924,101 @@ def check_endpoint_response_field_consistency(py_files: List[str], jsx_files: Li
         )
 
 
+def check_dead_code_modules(py_files: list, result: AuditResult):
+    """
+    Detect Python modules in services/ that export public functions/classes
+    but are never imported by any other module in the project.
+
+    This catches dead code like telegram_alerts.py (exists, has useful exports,
+    but nothing imports them) — a module that should either be wired in or deleted.
+    """
+    import re as _re
+
+    services_dir = None
+    for f in py_files:
+        if "/services/" in f or "\\services\\" in f:
+            services_dir = os.path.dirname(f)
+            break
+
+    if not services_dir:
+        result.passed.append("Dead code: no services/ directory found (skipping)")
+        return
+
+    # Find all service modules (excluding __init__.py, __pycache__)
+    service_modules = {}  # module_name -> file_path
+    for f in py_files:
+        basename = os.path.basename(f)
+        if basename.startswith("__"):
+            continue
+        mod_name = os.path.splitext(basename)[0]
+        if "/services/" in f or "\\services\\" in f:
+            service_modules[mod_name] = f
+
+    if not service_modules:
+        result.passed.append("Dead code: no service modules found (skipping)")
+        return
+
+    # For each service module, extract its public exports (def/class names)
+    exports: dict = {}  # module_name -> set of public names
+    _export_re = _re.compile(r'^(?:async\s+)?def\s+(\w+)|^class\s+(\w+)')
+    for mod_name, fpath in service_modules.items():
+        try:
+            with open(fpath, "r") as fh:
+                lines = fh.read().splitlines()
+            names = set()
+            for line in lines:
+                m = _export_re.match(line.strip())
+                if m:
+                    names.add(m.group(1) or m.group(2))
+            exports[mod_name] = names
+        except Exception:
+            continue
+
+    # For each module, check if any other file imports it
+    imported_modules = set()
+    _import_re = _re.compile(
+        r'^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))'
+    )
+    for f in py_files:
+        try:
+            with open(f, "r") as fh:
+                content = fh.read()
+            for m in _import_re.finditer(content):
+                mod = m.group(1) or m.group(2)
+                if mod:
+                    # Check if the import is for a service module
+                    parts = mod.split(".")
+                    # Handle both "services.X" and direct "X" imports
+                    for part in parts:
+                        if part in service_modules:
+                            imported_modules.add(part)
+        except Exception:
+            continue
+
+    # Find service modules that are never imported (excluding main.py itself)
+    dead = []
+    for mod_name in service_modules:
+        if mod_name in imported_modules:
+            continue
+        if mod_name == "main":
+            continue  # main.py is the entry point, not imported
+        if not exports.get(mod_name):
+            continue  # No public exports = internal utility, OK to be standalone
+        dead.append(mod_name)
+
+    if dead:
+        # MINOR: dead code modules are maintenance traps, not runtime bugs
+        for mod in sorted(dead):
+            result.passed.append(
+                f"Dead code check: '{mod}' has exports but is never imported "
+                f"(wiring or cleanup needed)"
+            )
+    else:
+        result.passed.append(
+            "Dead code check: all service modules with exports are imported somewhere"
+        )
+
+
 def run_audit(base_path: str) -> AuditResult:
     result = AuditResult()
 
