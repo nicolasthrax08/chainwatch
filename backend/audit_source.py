@@ -3199,6 +3199,292 @@ def check_dead_code_modules(py_files: list, result: AuditResult):
         )
 
 
+def check_closed_at_on_status_transition(py_files: List[str], result: AuditResult):
+    """
+    New check (Cycle 2026-06-09): Verify that all UPDATE copy_trade_signals
+    statements that set status to a terminal state ('failed' or 'executed')
+    also set closed_at = NOW(). The closed_at column was added in migration 016
+    but was never populated by application code — this check catches that gap.
+    """
+    import re
+
+    found_any = False
+
+    for fpath in py_files:
+        if fpath.endswith("audit_source.py"):
+            continue
+        text = read_file(fpath)
+        file_lines = lines(text)
+
+        # Collect multi-line SQL blocks that contain UPDATE copy_trade_signals
+        i = 0
+        while i < len(file_lines):
+            line = file_lines[i]
+            stripped = line.strip()
+
+            if re.search(r'UPDATE\s+copy_trade_signals', stripped, re.IGNORECASE):
+                # Collect the full SQL block until WHERE or end of statement
+                sql_lines = [stripped]
+                start_line = i + 1
+                j = i + 1
+                while j < len(file_lines):
+                    next_stripped = file_lines[j].strip()
+                    sql_lines.append(next_stripped)
+                    if re.search(r'WHERE\s+', ' '.join(sql_lines), re.IGNORECASE):
+                        break
+                    j += 1
+
+                full_sql = ' '.join(sql_lines)
+
+                # Check if this UPDATE sets status to a terminal state
+                if re.search(r"SET\s+.*status\s*=\s*'(?:failed|executed)'", full_sql, re.IGNORECASE):
+                    found_any = True
+                    has_closed_at = bool(re.search(r'closed_at\s*=\s*NOW\(\)', full_sql, re.IGNORECASE))
+                    if not has_closed_at:
+                        result.add(Finding(
+                            pitfall="closed-at-missing",
+                            severity="critical",
+                            file=fpath,
+                            line=start_line,
+                            description=(
+                                "UPDATE copy_trade_signals sets status to terminal state "
+                                "but does NOT set closed_at = NOW(). The closed_at column "
+                                "(added in migration 016) will remain NULL, breaking signal "
+                                "lifecycle tracking."
+                            ),
+                            suggestion="Add ', closed_at = NOW()' to the SET clause of this UPDATE statement.",
+                        ))
+                    else:
+                        result.add_pass(
+                            f"closed_at on transition: {fpath}:{start_line} — "
+                            f"UPDATE copy_trade_signals correctly includes closed_at = NOW()"
+                        )
+
+                i = j + 1 if j > i else i + 1
+            else:
+                i += 1
+
+    if not found_any:
+        result.add_pass(
+            "closed_at on transition: No UPDATE copy_trade_signals with terminal status found "
+            "(check not applicable)"
+        )
+
+
+def check_stale_signal_expiry(py_files: List[str], result: AuditResult):
+    """
+    New check (Cycle 2026-06-09): Verify that the monitor contains a phase
+    that auto-expires stale pending signals. Without this, signals can stay
+    in 'pending' forever when mirror_trade is never invoked.
+
+    Checks:
+    1. SIGNAL_STALE_THRESHOLD_HOURS constant exists and is > 0
+    2. A phase runs UPDATE copy_trade_signals SET status = 'stale' for old pending signals
+    3. The stale UPDATE also sets closed_at = NOW()
+    """
+    found_threshold = False
+    found_expiry_phase = False
+    found_stale_closed_at = False
+
+    for fpath in py_files:
+        if fpath.endswith("audit_source.py"):
+            continue
+        text = read_file(fpath)
+        file_lines = lines(text)
+
+        # Check 1: SIGNAL_STALE_THRESHOLD_HOURS exists and is > 0
+        for i, line in enumerate(file_lines):
+            stripped = line.strip()
+            m = re.match(r'SIGNAL_STALE_THRESHOLD_HOURS\s*=\s*(\d+)', stripped)
+            if m:
+                found_threshold = True
+                val = int(m.group(1))
+                if val <= 0:
+                    result.add(Finding(
+                        pitfall="stale-threshold-invalid",
+                        severity="critical",
+                        file=fpath,
+                        line=i + 1,
+                        description=f"SIGNAL_STALE_THRESHOLD_HOURS={val} is not positive.",
+                        suggestion="Set SIGNAL_STALE_THRESHOLD_HOURS to a positive integer (e.g., 72 for 72 hours).",
+                    ))
+                break
+
+        # Check 2: Phase that expires stale pending signals
+        full_text = text
+        if re.search(r"UPDATE\s+copy_trade_signals\s+SET\s+.*status\s*=\s*['\"]stale['\"]", full_text, re.IGNORECASE | re.DOTALL):
+            found_expiry_phase = True
+            # Check 3: closed_at is also set
+            if re.search(r"status\s*=\s*['\"]stale['\"].*closed_at\s*=\s*NOW\(\)", full_text, re.IGNORECASE | re.DOTALL):
+                found_stale_closed_at = True
+            # Also check reversed order (closed_at before status)
+            elif re.search(r"closed_at\s*=\s*NOW\(\).*status\s*=\s*['\"]stale['\"]", full_text, re.IGNORECASE | re.DOTALL):
+                found_stale_closed_at = True
+
+    if not found_threshold:
+        result.add(Finding(
+            pitfall="stale-threshold-missing",
+            severity="minor",
+            file="services/monitor.py",
+            line=0,
+            description=(
+                "No SIGNAL_STALE_THRESHOLD_HOURS constant found. "
+                "Without this, there's no configuration for stale signal expiry."
+            ),
+            suggestion="Add SIGNAL_STALE_THRESHOLD_HOURS = 72 in monitor.py.",
+        ))
+    else:
+        result.add_pass("stale expiry threshold: SIGNAL_STALE_THRESHOLD_HOURS is defined")
+
+    if not found_expiry_phase:
+        result.add(Finding(
+            pitfall="stale-expiry-phase-missing",
+            severity="minor",
+            file="services/monitor.py",
+            line=0,
+            description=(
+                "No UPDATE copy_trade_signals SET status='stale' found. "
+                "Signals may stay 'pending' forever if mirror_trade is never invoked."
+            ),
+            suggestion=(
+                "Add a monitor phase that expires old pending signals: "
+                "UPDATE copy_trade_signals SET status='stale', closed_at=NOW() "
+                "WHERE status='pending' AND created_at < NOW() - make_interval(hours => N)"
+            ),
+        ))
+    else:
+        if found_stale_closed_at:
+            result.add_pass("stale expiry phase: Status='stale' transition includes closed_at = NOW()")
+        else:
+            result.add(Finding(
+                pitfall="stale-expiry-missing-closed-at",
+                severity="critical",
+                file="services/monitor.py",
+                line=0,
+                description=(
+                    "The stale signal expiry UPDATE does NOT set closed_at = NOW(). "
+                    "The closed_at column will remain NULL for stale signals."
+                ),
+                suggestion="Add closed_at = NOW() to the stale expiry UPDATE statement.",
+            ))
+
+
+def check_signal_history_endpoint(py_files: List[str], result: AuditResult):
+    """
+    New check (Cycle 2026-06-09 13:00): Verify that a /api/signals/history endpoint
+    exists and returns recently closed signals with proper field coverage.
+
+    Checks:
+    1. GET /api/signals/history endpoint is registered
+    2. It filters by closed_at IS NOT NULL (only closed signals)
+    3. It returns time_to_close_seconds field
+    4. It orders by closed_at DESC
+    """
+    found_endpoint = False
+    found_closed_at_filter = False
+    found_time_to_close = False
+    found_order_by = False
+
+    for fpath in py_files:
+        src = read_file(fpath)
+        if not src:
+            continue
+        if "@app.get(\"/api/signals/history\")" in src or '@app.get("/api/signals/history")' in src:
+            found_endpoint = True
+            if "closed_at IS NOT NULL" in src:
+                found_closed_at_filter = True
+            if "time_to_close_seconds" in src:
+                found_time_to_close = True
+            if "closed_at DESC" in src:
+                found_order_by = True
+
+    if found_endpoint:
+        result.passed.append("Signal history endpoint: GET /api/signals/history exists")
+    else:
+        result.findings.append(Finding(
+            pitfall="signal-history-endpoint-missing",
+            severity="minor",
+            file="main.py",
+            line=0,
+            description="No GET /api/signals/history endpoint found. Users cannot view recently closed signals.",
+            suggestion="Add a GET /api/signals/history endpoint that returns executed/failed/stale signals with closed_at.",
+        ))
+        return
+
+    if found_closed_at_filter:
+        result.passed.append("Signal history endpoint: filters by closed_at IS NOT NULL")
+    else:
+        result.findings.append(Finding(
+            pitfall="signal-history-missing-closed-filter",
+            severity="minor",
+            file="main.py",
+            line=0,
+            description="Signal history endpoint does not filter by closed_at IS NOT NULL.",
+            suggestion="Add 'closed_at IS NOT NULL' to the WHERE clause to only return closed signals.",
+        ))
+
+    if found_time_to_close:
+        result.passed.append("Signal history endpoint: returns time_to_close_seconds")
+    else:
+        result.findings.append(Finding(
+            pitfall="signal-history-missing-time-to-close",
+            severity="minor",
+            file="main.py",
+            line=0,
+            description="Signal history endpoint does not compute time_to_close_seconds.",
+            suggestion="Add EXTRACT(EPOCH FROM (closed_at - created_at)) AS time_to_close_seconds to the SELECT.",
+        ))
+
+    if found_order_by:
+        result.passed.append("Signal history endpoint: orders by closed_at DESC")
+    else:
+        result.findings.append(Finding(
+            pitfall="signal-history-missing-order",
+            severity="minor",
+            file="main.py",
+            line=0,
+            description="Signal history endpoint does not order by closed_at DESC.",
+            suggestion="Add ORDER BY closed_at DESC to show most recently closed signals first.",
+        ))
+
+
+def check_duplicate_cycle_stats(py_files: List[str], result: AuditResult):
+    """
+    New check (Cycle 2026-06-09 13:00): Detect duplicate _cycle_stats.append() calls
+    within the same function. Duplicate recording means two entries per cycle, with
+    the first one missing Phase 7 data (signals_stale_expired).
+    """
+    for fpath in py_files:
+        # Skip the audit tool itself (it contains the search string in check code)
+        if fpath.endswith("audit_source.py"):
+            continue
+        src = read_file(fpath)
+        if not src:
+            continue
+        # Count _cycle_stats.append occurrences
+        count = src.count("_cycle_stats.append(")
+        if count > 1:
+            # Check if they're in the same function (heuristic: same file, multiple occurrences)
+            result.findings.append(Finding(
+                pitfall="duplicate-cycle-stats",
+                severity="minor",
+                file=fpath.replace(os.getcwd() + os.sep, "").replace(os.getcwd(), "."),
+                line=0,
+                description=(
+                    f"Found {count} _cycle_stats.append() calls. "
+                    "Duplicate recording creates two entries per cycle, the first missing Phase 7 data."
+                ),
+                suggestion=(
+                    "Remove the first _cycle_stats.append() block (before Phase 7). "
+                    "Keep only the one after all phases complete."
+                ),
+            ))
+        elif count == 1:
+            rel = fpath.replace(os.getcwd() + os.sep, "").replace(os.getcwd(), ".")
+            result.passed.append(f"Duplicate cycle stats: {rel} — only 1 _cycle_stats.append (OK)")
+        # count == 0: not the monitor file, skip
+
+
 def run_audit(base_path: str) -> AuditResult:
     result = AuditResult()
 
@@ -3261,6 +3547,10 @@ def run_audit(base_path: str) -> AuditResult:
     check_portfolio_change_delta_consistency(py_files, result)
     check_alert_fired_dict_notify_telegram(py_files, result)
     check_endpoint_response_field_consistency(py_files, jsx_files, result)
+    check_closed_at_on_status_transition(py_files, result)
+    check_stale_signal_expiry(py_files, result)
+    check_signal_history_endpoint(py_files, result)
+    check_duplicate_cycle_stats(py_files, result)
 
     return result
 

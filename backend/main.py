@@ -1514,6 +1514,155 @@ async def get_signals(
     }
 
 
+@app.get("/api/signals/stats")
+async def get_signal_stats(
+    user: dict = Depends(get_current_user),
+):
+    """
+    Aggregate performance statistics for the user's copy-trade signals.
+
+    Returns:
+        - total_signals: total count
+        - by_status: count per status (pending/executed/failed)
+        - avg_confidence: average confidence_score overall and per status
+        - avg_whale_score: average score_at_generation overall and per status
+        - execution_rate: fraction of signals that have been executed
+        - recent_signals: count of signals in the last 24h and 7d
+        - avg_time_to_execute: average seconds from created_at to executed_at (for executed signals)
+    """
+    async with acquire_db() as conn:
+        # ── Overall counts and averages ──
+        row = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*) AS total_signals,
+                COUNT(*) FILTER (WHERE cts.status = 'pending') AS pending_count,
+                COUNT(*) FILTER (WHERE cts.status = 'executed') AS executed_count,
+                COUNT(*) FILTER (WHERE cts.status = 'failed') AS failed_count,
+                COUNT(*) FILTER (WHERE cts.status = 'stale') AS stale_count,
+                ROUND(AVG(cts.confidence_score)::DECIMAL, 3) AS avg_confidence,
+                ROUND(AVG(cts.score_at_generation)::DECIMAL, 3) AS avg_whale_score,
+                ROUND(AVG(cts.confidence_score) FILTER (WHERE cts.status = 'executed')::DECIMAL, 3) AS avg_confidence_executed,
+                ROUND(AVG(cts.confidence_score) FILTER (WHERE cts.status = 'failed')::DECIMAL, 3) AS avg_confidence_failed,
+                ROUND(AVG(cts.score_at_generation) FILTER (WHERE cts.status = 'executed')::DECIMAL, 3) AS avg_whale_score_executed,
+                COUNT(*) FILTER (WHERE cts.created_at >= NOW() - INTERVAL '24 hours') AS signals_24h,
+                COUNT(*) FILTER (WHERE cts.created_at >= NOW() - INTERVAL '7 days') AS signals_7d,
+                ROUND(AVG(
+                    EXTRACT(EPOCH FROM (cts.executed_at - cts.created_at))
+                ) FILTER (WHERE cts.status = 'executed' AND cts.executed_at IS NOT NULL)::DECIMAL, 1) AS avg_time_to_execute_seconds
+            FROM copy_trade_signals cts
+            JOIN wallets w ON w.id = cts.wallet_id
+            WHERE w.user_id = $1
+            """,
+            user["id"],
+        )
+
+    total = row["total_signals"] or 0
+    executed = row["executed_count"] or 0
+    execution_rate = round(executed / total, 3) if total > 0 else 0.0
+
+    return {
+        "total_signals": total,
+        "by_status": {
+            "pending": row["pending_count"] or 0,
+            "executed": executed,
+            "failed": row["failed_count"] or 0,
+            "stale": row["stale_count"] or 0,
+        },
+        "avg_confidence": float(row["avg_confidence"] or 0),
+        "avg_whale_score": float(row["avg_whale_score"] or 0),
+        "avg_confidence_by_status": {
+            "executed": float(row["avg_confidence_executed"] or 0),
+            "failed": float(row["avg_confidence_failed"] or 0),
+        },
+        "avg_whale_score_executed": float(row["avg_whale_score_executed"] or 0),
+        "execution_rate": execution_rate,
+        "recent_signals": {
+            "last_24h": row["signals_24h"] or 0,
+            "last_7d": row["signals_7d"] or 0,
+        },
+        "avg_time_to_execute_seconds": float(row["avg_time_to_execute_seconds"] or 0),
+    }
+
+
+@app.get("/api/signals/history")
+async def get_signal_history(
+    limit: int = Query(20, ge=1, le=100),
+    status_filter: str = Query(None, regex="^(executed|failed|stale)$"),
+    user: dict = Depends(get_current_user),
+):
+    """
+    Return recently closed signals (executed/failed/stale) with outcome details.
+
+    Returns signals that have reached a terminal state, ordered by closed_at DESC.
+    Includes wallet info, signal details, and computed time-to-close.
+
+    Query params:
+        - limit: max results (1-100, default 20)
+        - status_filter: optional filter by status (executed|failed|stale)
+    """
+    conditions = ["w.user_id = $1", "cts.closed_at IS NOT NULL"]
+    params: list = [user["id"]]
+    param_idx = 2
+
+    if status_filter:
+        conditions.append(f"cts.status = ${param_idx}")
+        params.append(status_filter)
+        param_idx += 1
+
+    params.append(limit)
+
+    where_clause = " AND ".join(conditions)
+
+    async with acquire_db() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT cts.id, cts.token_symbol, cts.action, cts.amount_usd,
+                   cts.confidence_score, cts.score_at_generation,
+                   cts.status, cts.explanation, cts.explanation_stale,
+                   cts.created_at, cts.executed_at, cts.closed_at,
+                   EXTRACT(EPOCH FROM (cts.closed_at - cts.created_at)) AS time_to_close_seconds,
+                   w.address AS wallet_address, w.label AS wallet_label,
+                   w.whale_score
+            FROM copy_trade_signals cts
+            JOIN wallets w ON w.id = cts.wallet_id
+            WHERE {where_clause}
+            ORDER BY cts.closed_at DESC
+            LIMIT ${param_idx}
+            """,
+            *params,
+        )
+
+    return {
+        "signals": [
+            {
+                "id": str(r["id"]),
+                "token_symbol": r["token_symbol"],
+                "action": r["action"],
+                "amount_usd": float(r["amount_usd"] or 0),
+                "confidence_score": float(r["confidence_score"] or 0),
+                "confidence_final": round(
+                    0.5 * float(r["confidence_score"] or 0)
+                    + 0.5 * float(r["score_at_generation"] or 0), 2
+                ),
+                "whale_score": float(r["whale_score"] or 0),
+                "score_at_generation": float(r["score_at_generation"] or 0),
+                "wallet_address": r["wallet_address"],
+                "wallet_label": r["wallet_label"],
+                "status": r["status"],
+                "explanation": r["explanation"],
+                "explanation_stale": bool(r["explanation_stale"]),
+                "created_at": r["created_at"].isoformat(),
+                "executed_at": r["executed_at"].isoformat() if r["executed_at"] else None,
+                "closed_at": r["closed_at"].isoformat() if r["closed_at"] else None,
+                "time_to_close_seconds": float(r["time_to_close_seconds"] or 0),
+            }
+            for r in rows
+        ],
+        "count": len(rows),
+    }
+
+
 @app.post("/api/signals/{signal_id}/explain")
 async def regenerate_explanation(
     signal_id: str,
@@ -1773,7 +1922,7 @@ async def mirror_trade(
             await conn.execute(
                 """
                 UPDATE copy_trade_signals
-                SET status = 'failed'
+                SET status = 'failed', closed_at = NOW()
                 WHERE id = $1
                 """,
                 signal_id
@@ -1789,7 +1938,7 @@ async def mirror_trade(
             await conn.execute(
                 """
                 UPDATE copy_trade_signals
-                SET status = 'failed'
+                SET status = 'failed', closed_at = NOW()
                 WHERE id = $1
                 """,
                 signal_id
@@ -1800,7 +1949,7 @@ async def mirror_trade(
         await conn.execute(
             """
             UPDATE copy_trade_signals
-            SET status = 'executed', executed_at = NOW()
+            SET status = 'executed', executed_at = NOW(), closed_at = NOW()
             WHERE id = $1
             """,
             signal_id

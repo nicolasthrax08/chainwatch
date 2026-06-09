@@ -40,6 +40,16 @@ MAX_CONSECUTIVE_ERRORS = 5    # skip wallet after this many consecutive errors
 WALLET_FETCH_TIMEOUT = 25     # hard timeout per wallet (seconds)
 MAX_CONCURRENT_WALLETS = 5    # semaphore cap for concurrent on-chain fetches
 
+# ── Signal Stale Expiry ───────────────────────────────────────────────
+# Signals that remain 'pending' beyond this threshold are auto-expired
+# to 'stale' status. This prevents signals from living forever when
+# mirror_trade is never invoked (e.g., user has no Alpaca keys).
+# Default: 72 hours (3 days).
+SIGNAL_STALE_THRESHOLD_HOURS = 72
+# Run expiry check every N poll cycles (not every cycle — avoid unnecessary writes)
+STALE_EXPIRY_INTERVAL_CYCLES = 10
+_stale_expiry_cycle_counter: int = 0
+
 # ── Cycle statistics (ring buffer for health endpoint) ────────────────
 # Fixed-size history to prevent unbounded memory growth (Pitfall #12).
 _MAX_CYCLE_HISTORY = 20
@@ -588,6 +598,37 @@ async def _poll_all_wallets_inner() -> None:
                 )
     _phase_durations["phase6_signals_alerts"] = round(_time_mod.monotonic() - _phase_t0, 3)
 
+    # ── Phase 7: Expire stale pending signals (separate DB connection) ──
+    # Pitfall #23: Uses a separate connection from Phase 6's transaction.
+    # Runs every STALE_EXPIRY_INTERVAL_CYCLES to avoid unnecessary writes.
+    _phase_t0 = _time_mod.monotonic()
+    global _stale_expiry_cycle_counter
+    _stale_expiry_cycle_counter += 1
+    _stale_expired_count = 0
+    if _stale_expiry_cycle_counter >= STALE_EXPIRY_INTERVAL_CYCLES:
+        _stale_expiry_cycle_counter = 0
+        try:
+            async with _pool.acquire() as conn:
+                expired_ids = await conn.fetch(
+                    """
+                    UPDATE copy_trade_signals
+                    SET status = 'stale', closed_at = NOW()
+                    WHERE status = 'pending'
+                      AND created_at < NOW() - make_interval(hours => $1)
+                    RETURNING id
+                    """,
+                    SIGNAL_STALE_THRESHOLD_HOURS,
+                )
+                _stale_expired_count = len(expired_ids)
+                if _stale_expired_count > 0:
+                    logger.info(
+                        "Phase 7: Expired %d stale pending signal(s) (threshold=%dh)",
+                        _stale_expired_count, SIGNAL_STALE_THRESHOLD_HOURS,
+                    )
+        except Exception as e:
+            logger.warning("Phase 7: Stale signal expiry failed: %s", e, exc_info=True)
+    _phase_durations["phase7_stale_expiry"] = round(_time_mod.monotonic() - _phase_t0, 3)
+
     # ── Record cycle statistics ─────────────────────────────────────────
     _last_cycle_duration = _time_mod.monotonic() - _cycle_t0
     _entry = {
@@ -596,6 +637,7 @@ async def _poll_all_wallets_inner() -> None:
         "wallets_processed": _wallets_processed,
         "wallets_changed": _wallets_changed,
         "signals_generated": _signals_generated,
+        "signals_stale_expired": _stale_expired_count,
         "alerts_fired": _alerts_fired,
         "errors": _errors,
         "phase_durations_s": _phase_durations,
