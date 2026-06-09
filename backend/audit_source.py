@@ -2927,6 +2927,99 @@ def check_portfolio_change_delta_consistency(py_files: List[str], result: AuditR
     result.add_pass("Pitfall #F1: No portfolio_change rule found (check not applicable)")
 
 
+def check_alert_fired_dict_notify_telegram(py_files: List[str], result: AuditResult):
+    """
+    New check (Cycle 2026-06-09): Verify that ALL alert rule type fired.append()
+    dicts in alert_evaluator.py include the 'notify_telegram' field. Missing it
+    causes the Telegram send loop to always send (defaulting to True), ignoring
+    the user's per-alert opt-in preference.
+    """
+    for fpath in py_files:
+        if not fpath.endswith("alert_evaluator.py"):
+            continue
+        if fpath.endswith("audit_source.py"):
+            continue
+        text = read_file(fpath)
+        file_lines = lines(text)
+
+        # Find all fired.append blocks and check which rule_type they belong to
+        # Strategy: find each "elif rule_type ==" block, then look for fired.append
+        # within that block, and check if 'notify_telegram' is in the dict literal.
+        in_rule_block = False
+        current_rule = None
+        brace_depth = 0
+        append_block_lines = []
+        append_start_line = 0
+        rule_has_notify_telegram = {}
+        inside_append = False
+
+        for i, line in enumerate(file_lines, 1):
+            stripped = line.strip()
+
+            # Detect rule_type blocks
+            if 'rule_type == "' in line or "rule_type == '" in line:
+                in_rule_block = True
+                # Extract the rule type
+                import re as _re
+                m = _re.search(r'rule_type\s*==\s*["\'](\w+)["\']', line)
+                current_rule = m.group(1) if m else "unknown"
+                rule_has_notify_telegram[current_rule] = False
+                continue
+
+            if in_rule_block:
+                # Detect fired.append({ start
+                if "fired.append" in line and "{" in line:
+                    inside_append = True
+                    append_block_lines = [line]
+                    append_start_line = i
+                    brace_depth = line.count("{") - line.count("}")
+                    continue
+
+                if inside_append:
+                    append_block_lines.append(line)
+                    brace_depth += line.count("{") - line.count("}")
+                    if brace_depth <= 0:
+                        # Block complete — check for notify_telegram
+                        block_text = " ".join(append_block_lines)
+                        if "notify_telegram" in block_text:
+                            rule_has_notify_telegram[current_rule] = True
+                        inside_append = False
+                        append_block_lines = []
+
+                # Exit rule block at next elif/else
+                if ("elif rule_type" in line or stripped == "else:") and not inside_append:
+                    in_rule_block = False
+                    current_rule = None
+
+        # Report findings
+        for rule, has_field in rule_has_notify_telegram.items():
+            if not has_field:
+                result.add(Finding(
+                    pitfall="Alert fired dict missing notify_telegram",
+                    file=fpath,
+                    line=0,
+                    description=(
+                        f"Alert rule '{rule}' fired.append() dict is missing "
+                        f"'notify_telegram' field. The Telegram send loop defaults "
+                        f"to True, ignoring the user's per-alert opt-in preference."
+                    ),
+                    suggestion=(
+                        "Add 'notify_telegram': alert.get('notify_telegram', True) "
+                        "to the fired.append() dict, matching the other rule types."
+                    ),
+                    severity="minor",
+                ))
+                return
+
+        if rule_has_notify_telegram:
+            result.add_pass(
+                f"Alert fired dicts in {fpath} — all rule types include notify_telegram"
+            )
+            return
+
+    result.add_pass("Alert fired dict check — no alert_evaluator.py found (not applicable)")
+
+
 def check_endpoint_response_field_consistency(py_files: List[str], jsx_files: List[str], result: AuditResult):
     """
     New check: Verify that list_wallets and /api/dashboard return the same set of
@@ -3166,6 +3259,7 @@ def run_audit(base_path: str) -> AuditResult:
     check_alpaca_validation_before_db(py_files, result)
     check_mirror_trade_action_normalization(py_files, result)
     check_portfolio_change_delta_consistency(py_files, result)
+    check_alert_fired_dict_notify_telegram(py_files, result)
     check_endpoint_response_field_consistency(py_files, jsx_files, result)
 
     return result

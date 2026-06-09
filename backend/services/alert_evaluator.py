@@ -273,6 +273,7 @@ async def evaluate_alerts(
                                 "threshold": threshold,
                                 "trigger_value": round(drop_pct, 2),
                                 "message": f"Balance dropped {drop_pct:.1f}% (threshold: {threshold}%)",
+                                "notify_telegram": alert.get("notify_telegram", True),
                             })
                             break
 
