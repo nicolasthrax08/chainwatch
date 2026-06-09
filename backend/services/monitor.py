@@ -758,69 +758,92 @@ async def _check_wallet_balance_and_txs(
 # ── Price Cache (self-contained to avoid circular import with main.py) ─
 
 async def _ensure_prices_fetched() -> None:
-    """Refresh price cache if older than 60 s. Safe for concurrent callers."""
-    # HIGH-2 FIX: Hold the lock through check+fetch+update to avoid TOCTOU race
-    # where two coroutines both decide the cache is stale and issue redundant
-    # CoinGecko requests (wasting API quota).
+    """Refresh price cache if older than 60 s. Safe for concurrent callers.
+
+    Lock-splitting pattern: the _price_cache_lock is NOT held during HTTP I/O.
+    This prevents blocking all wallet processing when CoinGecko is slow or
+    rate-limited (Pitfall #12/M1: lock held across external HTTP calls).
+
+    Concurrency safety:
+    - A module-level _price_fetch_in_progress flag prevents thundering herd
+      (multiple concurrent coroutines all deciding to fetch simultaneously).
+    - Only one coroutine performs the HTTP fetch; others await its result.
+    """
+    import time as _time_mod
+
+    # ── Phase A: Check staleness under lock (fast, no I/O) ───────────
     async with _price_cache_lock:
-        now = time.time()
-        if _price_cache.get("timestamp", 0) > 0 and now - _price_cache["timestamp"] < 60:
+        now = _time_mod.time()
+        cache_age = now - _price_cache.get("timestamp", 0)
+        if _price_cache.get("timestamp", 0) > 0 and cache_age < 60:
             return  # Cache still valid
+        # If another coroutine is already fetching, skip — it will update the cache
+        if _price_cache.get("_fetch_in_progress", False):
+            return
+        # Mark fetch in progress so other coroutines don't also fetch
+        _price_cache["_fetch_in_progress"] = True
 
-        try:
-            from services.tx_fetcher import _get_client as _get_shared_client
-            cg_client = await _get_shared_client()
+    # ── Phase B: Fetch from CoinGecko (NO lock held) ─────────────────
+    new_prices = {}
+    try:
+        from services.tx_fetcher import _get_client as _get_shared_client
+        cg_client = await _get_shared_client()
 
-            # Fetch both price endpoints concurrently to reduce lock hold time
-            # and cut price refresh latency roughly in half.
-            resp, resp2 = await asyncio.gather(
-                cg_client.get(
-                    "https://api.coingecko.com/api/v3/simple/price",
-                    params={
-                        "ids": "ethereum",
-                        "vs_currencies": "usd,hkd,btc",
-                    },
-                ),
-                cg_client.get(
-                    "https://api.coingecko.com/api/v3/simple/price",
-                    params={
-                        "ids": "solana,bitcoin",
-                        "vs_currencies": "usd",
-                    },
-                ),
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        resp, resp2 = await asyncio.gather(
+            cg_client.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={
+                    "ids": "ethereum",
+                    "vs_currencies": "usd,hkd,btc",
+                },
+            ),
+            cg_client.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={
+                    "ids": "solana,bitcoin",
+                    "vs_currencies": "usd",
+                },
+            ),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        resp2.raise_for_status()
+        data2 = resp2.json()
 
-            resp2.raise_for_status()
-            data2 = resp2.json()
+        eth = data.get("ethereum", {})
+        eth_usd = eth.get("usd", 0)
+        eth_hkd = eth.get("hkd", 0)
+        eth_btc = eth.get("btc", 0)
+        sol_usd = data2.get("solana", {}).get("usd", 0)
+        btc_usd = data2.get("bitcoin", {}).get("usd", 0)
 
-            eth = data.get("ethereum", {})
-            eth_usd = eth.get("usd", 0)
-            eth_hkd = eth.get("hkd", 0)
-            eth_btc = eth.get("btc", 0)
+        new_prices = {
+            "ETH": eth_usd if eth_usd > 0 else _price_cache.get("ETH", 0.0),
+            "SOL": sol_usd if sol_usd > 0 else _price_cache.get("SOL", 0.0),
+            "BTC": btc_usd if btc_usd > 0 else _price_cache.get("BTC", 0.0),
+        }
+        if eth_usd > 0:
+            if eth_hkd > 0:
+                new_prices["USDHKD"] = eth_hkd / eth_usd
+            if eth_btc > 0:
+                new_prices["USDBTC"] = eth_btc / eth_usd
 
-            sol_usd = data2.get("solana", {}).get("usd", 0)
-            btc_usd = data2.get("bitcoin", {}).get("usd", 0)
+    except Exception as e:
+        logger.warning(f"Price refresh failed (using stale): {e}")
+        # Clear the in-progress flag so a retry can happen next cycle
+        async with _price_cache_lock:
+            _price_cache["_fetch_in_progress"] = False
+        return
 
-            _price_cache["ETH"] = eth_usd if eth_usd > 0 else _price_cache.get("ETH", 0.0)
-            _price_cache["SOL"] = sol_usd if sol_usd > 0 else _price_cache.get("SOL", 0.0)
-            _price_cache["BTC"] = btc_usd if btc_usd > 0 else _price_cache.get("BTC", 0.0)
+    # ── Phase C: Update cache under lock (fast, no I/O) ──────────────
+    async with _price_cache_lock:
+        _price_cache.update(new_prices)
+        _price_cache["timestamp"] = _time_mod.time()
+        _price_cache["_fetch_in_progress"] = False
 
-            # Compute cross-rates from ETH/USD base
-            if eth_usd > 0:
-                if eth_hkd > 0:
-                    _price_cache["USDHKD"] = eth_hkd / eth_usd
-                if eth_btc > 0:
-                    _price_cache["USDBTC"] = eth_btc / eth_usd
-
-            _price_cache["timestamp"] = now
-
-            if _price_cache["ETH"] > 0:
-                logger.info(
-                    f"Price cache refreshed: ETH=${_price_cache['ETH']}, "
-                    f"SOL=${_price_cache['SOL']}, BTC=${_price_cache['BTC']}, "
-                    f"USDHKD={_price_cache['USDHKD']:.4f}"
-                )
-        except Exception as e:
-            logger.warning(f"Price refresh failed (using stale): {e}")
+    if new_prices.get("ETH", 0) > 0:
+        logger.info(
+            f"Price cache refreshed: ETH=${new_prices['ETH']}, "
+            f"SOL=${new_prices.get('SOL', 0)}, BTC=${new_prices.get('BTC', 0)}, "
+            f"USDHKD={new_prices.get('USDHKD', _price_cache.get('USDHKD', 0)):.4f}"
+        )
