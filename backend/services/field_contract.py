@@ -151,7 +151,7 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
         nested={
             "fired_alert": {
                 "id", "alert_id", "rule_type",
-                "trigger_value", "details", "created_at",
+                "trigger_value", "details", "message", "created_at",
             },
         },
     ),

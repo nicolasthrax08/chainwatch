@@ -1381,7 +1381,7 @@ async def get_alert_history(user: dict = Depends(get_current_user)):
         rows = await conn.fetch(
             """
             SELECT fa.id, fa.alert_id, fa.rule_type,
-                   fa.trigger_value, fa.details, fa.created_at
+                   fa.trigger_value, fa.details, fa.message, fa.created_at
             FROM fired_alerts fa
             WHERE fa.user_id = $1
             ORDER BY fa.created_at DESC
@@ -1397,6 +1397,7 @@ async def get_alert_history(user: dict = Depends(get_current_user)):
                 "rule_type": r["rule_type"],
                 "trigger_value": float(r["trigger_value"] or 0),
                 "details": r["details"] if isinstance(r["details"], dict) else {},
+                "message": r["message"] or "",
                 "created_at": r["created_at"].isoformat(),
             }
             for r in rows

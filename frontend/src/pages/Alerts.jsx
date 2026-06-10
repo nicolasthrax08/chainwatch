@@ -316,6 +316,7 @@ function Alerts({ token, currency }) {
               <thead>
                 <tr>
                   <th>Rule Type</th>
+                  <th>Message</th>
                   <th>Trigger Value</th>
                   <th>Time</th>
                 </tr>
@@ -324,6 +325,9 @@ function Alerts({ token, currency }) {
                 {history.map(h => (
                   <tr key={h.id}>
                     <td>{h.rule_type}</td>
+                    <td style={{ maxWidth: 320, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {h.message || '—'}
+                    </td>
                     <td style={{ fontFamily: 'monospace' }}>
                       {h.trigger_value ? `$${h.trigger_value.toLocaleString()}` : '—'}
                     </td>
