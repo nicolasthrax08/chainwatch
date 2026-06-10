@@ -9,7 +9,7 @@ import asyncio
 import logging
 import random
 from typing import List, Dict, Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ async def fetch_btc_transactions(
                 "token": "BTC",
                 "usd_value": 0,  # Filled by caller with price data
                 "timestamp": (
-                    datetime.utcfromtimestamp(block_time).isoformat()
+                    datetime.fromtimestamp(block_time, timezone.utc).isoformat()
                     if block_time else ""
                 ),
                 "chain": "btc",
@@ -243,7 +243,7 @@ async def fetch_eth_transactions(
                 "token": "ETH",
                 "usd_value": 0,
                 "timestamp": (
-                    datetime.utcfromtimestamp(ts).isoformat() if ts else ""
+                    datetime.fromtimestamp(ts, timezone.utc).isoformat() if ts else ""
                 ),
                 "chain": "eth",
                 "status": (
@@ -353,7 +353,7 @@ async def fetch_sol_transactions(
                     "token": "SOL",
                     "usd_value": 0,
                     "timestamp": (
-                        datetime.utcfromtimestamp(block_time).isoformat()
+                        datetime.fromtimestamp(block_time, timezone.utc).isoformat()
                         if block_time else ""
                     ),
                     "chain": "sol",

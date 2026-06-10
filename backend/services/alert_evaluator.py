@@ -11,7 +11,7 @@ Rule types supported:
 """
 import logging
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("chainwatch.alerts")
 
@@ -137,7 +137,7 @@ async def evaluate_alerts(
         # Finding 10: Cooldown enforcement — skip if alert was recently fired
         # Check both DB-level last_fired_at and in-memory cache for speed
         last_fired_db = alert["last_fired_at"]
-        if last_fired_db and (datetime.utcnow() - last_fired_db).total_seconds() < _COOLDOWN_SECONDS:
+        if last_fired_db and (datetime.now(timezone.utc) - last_fired_db).total_seconds() < _COOLDOWN_SECONDS:
             continue
         if _is_cooldown_active(alert_id):
             continue

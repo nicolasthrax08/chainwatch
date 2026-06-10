@@ -3861,8 +3861,105 @@ def run_audit(base_path: str) -> AuditResult:
     check_signal_history_frontend(jsx_files, result)
     check_alert_update_notify_telegram(py_files, result)
     check_refresh_wallet_shared_clients(py_files, result)
+    check_whale_sentiment_buy_inflow(py_files, result)
+    check_signal_stats_field_contract(py_files, result)
 
     return result
+
+
+def check_whale_sentiment_buy_inflow(py_files: List[str], result: AuditResult):
+    """
+    Verify that the whale-sentiment endpoint counts both 'receive' AND 'buy'
+    transactions as inflow. Previously, only 'receive' was counted, which
+    excluded DEX swap purchases by whales from the sentiment calculation.
+    """
+    for fpath in py_files:
+        text = read_file(fpath)
+        if "whale_sentiment" not in text and "whale-sentiment" not in text:
+            continue
+        if fpath.endswith("audit_source.py") or fpath.endswith("field_contract.py"):
+            result.add_pass("whale_sentiment: buy txns counted as inflow")
+            continue
+
+        # Find the inflow_usd computation
+        lines = text.split('\n')
+        in_sentiment_func = False
+        found_buy_in_inflow = False
+        for i, line in enumerate(lines, 1):
+            if "def get_whale_sentiment" in line or "def whale_sentiment" in line:
+                in_sentiment_func = True
+                continue
+            if in_sentiment_func and line.strip() and not line[0].isspace() and "def " in line:
+                in_sentiment_func = False
+                break
+            if in_sentiment_func and "inflow_usd" in line:
+                # Check if 'buy' is included in the inflow type check
+                if '"buy"' in line or "'buy'" in line:
+                    found_buy_in_inflow = True
+                    break
+                # Also check for tuple form: ("receive", "buy")
+                if '("receive"' in line and '"buy"' in line:
+                    found_buy_in_inflow = True
+                    break
+
+        if found_buy_in_inflow:
+            result.add_pass("whale_sentiment: buy txns counted as inflow")
+        else:
+            result.add(Finding(
+                pitfall="#18",
+                severity="minor",
+                file=fpath,
+                line=0,
+                description="whale_sentiment inflow only counts 'receive' — 'buy' txns excluded from sentiment",
+                suggestion="Change inflow filter to: r['type'] in ('receive', 'buy')",
+            ))
+
+
+def check_signal_stats_field_contract(py_files: List[str], result: AuditResult):
+    """
+    Verify that the /api/signals/stats endpoint returns all fields the frontend
+    expects: total_signals, by_status, avg_confidence, avg_whale_score,
+    execution_rate, recent_signals (with last_7d, last_24h).
+    """
+    for fpath in py_files:
+        text = read_file(fpath)
+        if "signals/stats" not in text and "signal_stats" not in text:
+            continue
+        if fpath.endswith("audit_source.py") or fpath.endswith("field_contract.py"):
+            result.add_pass("signal_stats: field contract includes all frontend-accessed fields")
+            continue
+
+        lines = text.split('\n')
+        in_stats_func = False
+        found_fields = set()
+        for i, line in enumerate(lines, 1):
+            if "def get_signal_stats" in line:
+                in_stats_func = True
+                continue
+            if in_stats_func and line.strip() and not line[0].isspace() and "def " in line:
+                in_stats_func = False
+                break
+            if in_stats_func:
+                for field in ["total_signals", "by_status", "avg_confidence",
+                              "avg_whale_score", "execution_rate", "recent_signals",
+                              "avg_time_to_execute_seconds"]:
+                    if f'"{field}"' in line or f"'{field}'" in line:
+                        found_fields.add(field)
+
+        required = {"total_signals", "by_status", "avg_confidence", "avg_whale_score",
+                    "execution_rate", "recent_signals"}
+        missing = required - found_fields
+        if not missing:
+            result.add_pass("signal_stats: field contract includes all frontend-accessed fields")
+        else:
+            result.add(Finding(
+                pitfall="#18",
+                severity="minor",
+                file=fpath,
+                line=0,
+                description=f"signal_stats endpoint missing fields: {missing}",
+                suggestion=f"Ensure the return dict includes: {missing}",
+            ))
 
 
 def check_alert_update_notify_telegram(py_files: List[str], result: AuditResult):

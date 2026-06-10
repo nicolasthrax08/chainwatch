@@ -10,7 +10,7 @@ cleaned up via stop_monitor() on shutdown.
 import asyncio
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Set, Tuple
 
 import asyncpg
@@ -349,7 +349,7 @@ async def _poll_all_wallets_inner() -> None:
                             balance_btc      = $4,
                             last_balance_update = $5
                         WHERE id = $6
-                    """, bal_usd, bal_native, _bal_hkd, _bal_btc, datetime.utcnow(), wid)
+                    """, bal_usd, bal_native, _bal_hkd, _bal_btc, datetime.now(timezone.utc), wid)
 
                     if new_tx_hash:
                         # Stablecoins (USDC, USDT, DAI, etc.) should use $1.0 price,
@@ -373,7 +373,7 @@ async def _poll_all_wallets_inner() -> None:
                         """, wid, new_tx_hash, tx_type,
                             bal_nonnative_safe(tx_amount_native),
                             token, tx_usd_value,
-                            datetime.utcnow(), chain)
+                            datetime.now(timezone.utc), chain)
                         logger.info(
                             f"  → Stored new tx for {addr[:12]}…: "
                             f"{tx_type} {tx_amount_native} {token} ({chain})"
@@ -431,7 +431,7 @@ async def _poll_all_wallets_inner() -> None:
                                 {
                                     "type": "alert",
                                     "action": "fired",
-                                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                                    "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
                                     "payload": {
                                         "alert_id": f["alert_id"],
                                         "rule_type": f["rule_type"],
@@ -555,7 +555,7 @@ async def _poll_all_wallets_inner() -> None:
                     ws_pushes.append((uid, {
                         "type": "signal",
                         "action": "created",
-                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                        "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
                         "payload": {
                             "id": str(signal["id"]),
                             "wallet_id": str(signal["wallet_id"]),
@@ -632,7 +632,7 @@ async def _poll_all_wallets_inner() -> None:
     # ── Record cycle statistics ─────────────────────────────────────────
     _last_cycle_duration = _time_mod.monotonic() - _cycle_t0
     _entry = {
-        "ts": datetime.utcnow().isoformat() + "Z",
+        "ts": datetime.now(timezone.utc).isoformat() + "Z",
         "duration_s": round(_last_cycle_duration, 2),
         "wallets_processed": _wallets_processed,
         "wallets_changed": _wallets_changed,
@@ -869,6 +869,13 @@ async def _ensure_prices_fetched() -> None:
                 new_prices["USDHKD"] = eth_hkd / eth_usd
             if eth_btc > 0:
                 new_prices["USDBTC"] = eth_btc / eth_usd
+
+    except asyncio.CancelledError:
+        # CRITICAL: Coroutine was cancelled (e.g., during shutdown).
+        # Must clear _fetch_in_progress so future cycles can retry.
+        async with _price_cache_lock:
+            _price_cache["_fetch_in_progress"] = False
+        raise  # Re-raise to propagate cancellation
 
     except Exception as e:
         logger.warning(f"Price refresh failed (using stale): {e}")

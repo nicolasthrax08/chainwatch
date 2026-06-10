@@ -11,7 +11,7 @@ import asyncio
 import httpx
 import secrets
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Any
 from decimal import Decimal
 
@@ -36,7 +36,7 @@ def _log_startup_event(event: str, detail: str = "") -> None:
     """Record a startup event with timestamp. Thread-safe within asyncio."""
     import time as _time
     entry = {
-        "ts": datetime.utcnow().isoformat() + "Z",
+        "ts": datetime.now(timezone.utc).isoformat() + "Z",
         "event": event,
         "detail": detail,
     }
@@ -268,8 +268,8 @@ def create_jwt(wallet_address: str, user_id: str = "", created_at: str = "") -> 
     payload = {
         "sub": wallet_address,
         "uid": user_id,
-        "iat": datetime.utcnow(),
-        "exp": datetime.utcnow() + timedelta(days=7),
+        "iat": datetime.now(timezone.utc),
+        "exp": datetime.now(timezone.utc) + timedelta(days=7),
         "jti": str(uuid.uuid4()),
     }
     if created_at:
@@ -476,7 +476,7 @@ async def verify_signature(req: WalletConnectRequest):
             WHERE wallet_address = $3
             """,
             token,
-            datetime.utcnow() + timedelta(days=7),
+            datetime.now(timezone.utc) + timedelta(days=7),
             req.wallet_address.lower()
         )
 
@@ -1174,7 +1174,7 @@ async def refresh_wallet(
             WHERE id = $6
             """,
             balance_native, balance_usd, balance_hkd, balance_btc,
-            datetime.utcnow(), wallet_id,
+            datetime.now(timezone.utc), wallet_id,
         )
 
     return {
@@ -1185,7 +1185,7 @@ async def refresh_wallet(
         "balance_usd": round(balance_usd, 2),
         "balance_hkd": balance_hkd,
         "balance_btc": balance_btc,
-        "last_balance_update": datetime.utcnow().isoformat(),
+        "last_balance_update": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -2065,10 +2065,13 @@ async def get_whale_sentiment(user: dict = Depends(get_current_user)):
     Aggregate the last 50 transactions from all tracked whale wallets
     (is_whale == True) and compute an inflow/outflow sentiment ratio.
 
+    Inflow includes both 'receive' (transfer in) and 'buy' (DEX purchase) txns.
+    Outflow includes 'send' txns. 'other' txns are excluded from the ratio.
+
     Returns:
         sentiment_score: 0.0 (all outflow) → 1.0 (all inflow), 0.5 = neutral
         classification:  human-readable string
-        inflow_usd:      total USD value of 'receive' txns
+        inflow_usd:      total USD value of 'receive' + 'buy' txns
         outflow_usd:     total USD value of 'send' txns
         tx_count:        number of transactions analysed
     """
@@ -2097,7 +2100,7 @@ async def get_whale_sentiment(user: dict = Depends(get_current_user)):
         }
 
     inflow_usd = sum(
-        float(r["usd_value"] or 0) for r in rows if r["type"] == "receive"
+        float(r["usd_value"] or 0) for r in rows if r["type"] in ("receive", "buy")
     )
     outflow_usd = sum(
         float(r["usd_value"] or 0) for r in rows if r["type"] == "send"
@@ -2286,7 +2289,7 @@ async def health_check():
 
     report = {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
         "version": "1.0.0",
         "subsystems": {},
     }
@@ -2394,7 +2397,7 @@ async def health_diagnostic():
     import time as _time
 
     report = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
         "checks": {},
     }
 
@@ -2530,7 +2533,7 @@ async def health_startup_log():
     Safe: contains no secrets, only event names and timestamps.
     """
     return JSONResponse(content={
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
         "entries": _get_startup_log_entries(),
     })
 

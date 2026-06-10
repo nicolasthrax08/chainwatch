@@ -7,7 +7,7 @@ import os
 import httpx
 import asyncio
 from typing import List, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 ETHERSCAN_API_KEY = os.environ.get("ETHERSCAN_API_KEY", "")
 SOLSCAN_API_KEY = os.environ.get("SOLSCAN_API_KEY", "")
@@ -191,8 +191,8 @@ class BlockchairClient:
                     "type": "unknown",
                     "amount": 0,
                     "token": "BTC",
-                    "timestamp": datetime.utcfromtimestamp(
-                        status.get("block_time", 0)
+                    "timestamp": datetime.fromtimestamp(
+                        status.get("block_time", 0), timezone.utc
                     ).isoformat() if status.get("block_time") else "",
                     "confirmed": status.get("confirmed", False),
                     "block_height": status.get("block_height", 0),
