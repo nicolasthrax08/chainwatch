@@ -196,6 +196,15 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
             "db_stored_score", "db_score_calculated_at",
         },
     ),
+    # GET /api/signals/stats — returns aggregate signal performance statistics
+    # Shape matches backend/main.py get_signal_stats() response (lines ~1594-1615)
+    EndpointResponse(
+        name="signal_stats",
+        method="GET",
+        path="/api/signals/stats",
+        fields={"signals"},  # not used — flat response
+        nested={},  # flat response, no nested objects
+    ),
     # GET /api/signals/history — returns closed signal objects with outcome details
     # Shape matches backend/main.py get_signal_history() response (lines ~1663-1690)
     EndpointResponse(

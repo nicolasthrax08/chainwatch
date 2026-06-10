@@ -106,7 +106,206 @@ const DASHBOARD_STATUS_COLORS = {
   pending: '#f59e0b',
   executed: '#10b981',
   failed: '#ef4444',
+  stale: '#6b7280',
 };
+
+function fmtDuration(seconds) {
+  if (!seconds && seconds !== 0) return '—';
+  const s = Math.round(seconds);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
+}
+
+/**
+ * Compact signal history widget for the Dashboard.
+ * Shows the 5 most recent closed signals with a summary header.
+ */
+function DashboardSignalHistory({ token, currency }) {
+  const [history, setHistory] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [expanded, setExpanded] = useState(false);
+
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      const data = await apiFetch('/signals/history?limit=5', token);
+      setHistory(data.signals || []);
+    } catch (e) {
+      setError(e.message || 'Failed to load signal history');
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    load();
+    const interval = setInterval(load, 60000);
+    return () => clearInterval(interval);
+  }, [load]);
+
+  const summary = useMemo(() => {
+    const counts = { executed: 0, failed: 0, stale: 0 };
+    for (const s of history) {
+      if (counts[s.status] !== undefined) counts[s.status]++;
+    }
+    return { total: history.length, ...counts };
+  }, [history]);
+
+  return (
+    <div className="card">
+      <div
+        className="card-title"
+        style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
+        onClick={() => setExpanded(e => !e)}
+      >
+        <span>
+          Signal History
+          {!loading && !error && history.length > 0 && (
+            <span style={{ fontSize: '0.75rem', color: '#6b7280', fontWeight: 400, marginLeft: '8px' }}>
+              {summary.total} closed
+            </span>
+          )}
+        </span>
+        <span style={{ fontSize: '0.75rem', color: '#8b8f98' }}>{expanded ? '▾' : '▸'}</span>
+      </div>
+
+      {!expanded && summary.total > 0 && (
+        <div style={{ display: 'flex', gap: '16px', padding: '8px 0', fontSize: '0.8rem', color: '#8b8f98' }}>
+          <span style={{ color: '#10b981' }}>✓ {summary.executed}</span>
+          <span style={{ color: '#ef4444' }}>✗ {summary.failed}</span>
+          <span style={{ color: '#6b7280' }}>⊘ {summary.stale}</span>
+        </div>
+      )}
+
+      {expanded && (
+        <div style={{ marginTop: '12px' }}>
+          {loading && <div style={{ color: '#8b8f98', fontSize: '0.85rem', padding: '16px 0' }}>Loading history…</div>}
+
+          {error && (
+            <div style={{ color: '#ef4444', fontSize: '0.85rem', padding: '16px 0' }}>
+              ⚠️ {error}
+              <button className="btn btn-secondary btn-sm" style={{ marginLeft: '8px' }} onClick={() => { setLoading(true); load(); }}>
+                Retry
+              </button>
+            </div>
+          )}
+
+          {!loading && !error && history.length === 0 && (
+            <div style={{ textAlign: 'center', padding: '24px', color: '#6b7280', fontSize: '0.85rem' }}>
+              No closed signals yet. Signals appear here after execution, failure, or expiry.
+            </div>
+          )}
+
+          {!loading && !error && history.length > 0 && (
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.08)', color: '#6b7280', textAlign: 'left' }}>
+                    <th style={{ padding: '6px 8px', fontWeight: 500 }}>Token</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 500 }}>Action</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 500 }}>Amount</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 500 }}>Status</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 500 }}>Time to Close</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 500 }}>Closed</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.map(s => (
+                    <tr key={s.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
+                      <td style={{ padding: '6px 8px', fontWeight: 600, color: '#e2e8f0' }}>{s.token_symbol}</td>
+                      <td style={{ padding: '6px 8px' }}>
+                        <span style={{
+                          fontSize: '0.7rem', fontWeight: 600, padding: '1px 5px', borderRadius: '3px',
+                          background: s.action === 'buy' ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)',
+                          color: s.action === 'buy' ? '#10b981' : '#ef4444',
+                        }}>{s.action.toUpperCase()}</span>
+                      </td>
+                      <td style={{ padding: '6px 8px', color: '#c4b5fd' }}>{fmtTotal(s.amount_usd, currency)}</td>
+                      <td style={{ padding: '6px 8px' }}>
+                        <span style={{
+                          fontSize: '0.7rem', fontWeight: 600, padding: '1px 5px', borderRadius: '3px',
+                          background: `${DASHBOARD_STATUS_COLORS[s.status] || '#6b7280'}22`,
+                          color: DASHBOARD_STATUS_COLORS[s.status] || '#6b7280',
+                        }}>{s.status}</span>
+                      </td>
+                      <td style={{ padding: '6px 8px', color: '#8b8f98' }}>{fmtDuration(s.time_to_close_seconds)}</td>
+                      <td style={{ padding: '6px 8px', color: '#6b7280', fontSize: '0.7rem' }}>{timeAgo(s.closed_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Signal performance stats widget for the Dashboard.
+ * Shows aggregate signal statistics in a compact grid.
+ * Reuses the same /api/signals/stats endpoint as CopyTrades.
+ */
+function DashboardSignalStats({ token }) {
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const data = await apiFetch('/signals/stats', token);
+        if (!cancelled) setStats(data);
+      } catch (e) {
+        // Silently fail — stats are optional enrichment
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    const interval = setInterval(load, 30000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [token]);
+
+  if (loading || !stats || stats.total_signals === 0) return null;
+
+  const executionRatePct = (stats.execution_rate * 100).toFixed(1);
+  const avgConfPct = (stats.avg_confidence * 100).toFixed(0);
+  const avgWhaleScorePct = (stats.avg_whale_score * 100).toFixed(0);
+
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+      gap: '12px',
+      marginBottom: '20px',
+    }}>
+      {[
+        { label: 'Total Signals', value: stats.total_signals, color: '#8b5cf6' },
+        { label: 'Execution Rate', value: `${executionRatePct}%`, color: '#10b981' },
+        { label: 'Avg Confidence', value: `${avgConfPct}%`, color: '#f59e0b' },
+        { label: 'Avg Whale Score', value: `${avgWhaleScorePct}%`, color: '#c4b5fd' },
+        { label: 'Pending', value: stats.by_status.pending, color: '#f59e0b' },
+        { label: 'Executed', value: stats.by_status.executed, color: '#10b981' },
+        { label: 'Signals (7d)', value: stats.recent_signals.last_7d, color: '#6b7280' },
+      ].map(({ label, value, color }) => (
+        <div key={label} style={{
+          background: '#13141a',
+          border: '1px solid rgba(255,255,255,0.06)',
+          borderRadius: '8px',
+          padding: '12px 14px',
+        }}>
+          <div style={{ fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>{label}</div>
+          <div style={{ fontSize: '18px', fontWeight: 700, color }}>{value}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function DashboardAnalyzeModal({ signal, currency, onMirror, onClose }) {
   if (!signal) return null;
@@ -370,6 +569,9 @@ function Dashboard({ token, currency }) {
         </div>
       </div>
 
+      {/* Signal Performance Stats — shown when user has signals */}
+      <DashboardSignalStats token={token} />
+
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
         {/* Personal Wallets — only these count toward portfolio total */}
         <div className="card">
@@ -583,6 +785,9 @@ function Dashboard({ token, currency }) {
             ))
           )}
         </div>
+
+      {/* Signal History — Closed Signals */}
+      <DashboardSignalHistory token={token} currency={currency} />
 
       {/* Recent Activity — Live Transaction Feed */}
       <div className="card">
