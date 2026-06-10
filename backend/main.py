@@ -858,8 +858,10 @@ async def get_dashboard(user: dict = Depends(get_current_user)):
             balance_usd = float(_db_balance)
         else:
             balance_usd = float(w["total_received"] or 0) - float(w["total_sent"] or 0)
-        # Estimate native balance from approximate price for whale classification
-        balance_native_est = balance_usd / _APPROX_PRICE_USD.get(w["chain"], 1.0)
+        # Estimate native balance from live price for whale classification
+        # (M5 fix: use live CoinGecko prices from _prices, not hardcoded _APPROX_PRICE_USD)
+        _chain_price = _prices.get(w["chain"].upper(), _APPROX_PRICE_USD.get(w["chain"], 1.0))
+        balance_native_est = balance_usd / _chain_price if _chain_price > 0 else 0
         tx_count = _tx_count_cache.get(str(w["id"]), 0)
         risk = classify_wallet(balance_native_est, w["chain"], tx_count)
         # Keep manual DB override OR auto-detected whale status
@@ -1568,11 +1570,11 @@ async def get_signals(
                 "status": s["status"],
                 "wallet_label": s["wallet_label"],
                 "created_at": s["created_at"].isoformat(),
-                # These columns were added in migration 007; use get() for safety
+                # These columns were added in migration 007; use .get() for safety
                 # in case the DB schema hasn't been migrated yet.
-                "explanation": s.get("explanation") if hasattr(s, "get") else (s["explanation"] if "explanation" in s else None),
-                "explanation_stale": bool(s.get("explanation_stale", False)) if hasattr(s, "get") else (s["explanation_stale"] if "explanation_stale" in s else False),
-                "score_at_generation": float(s["score_at_generation"] or 0) if "score_at_generation" in s else 0,
+                "explanation": s.get("explanation"),
+                "explanation_stale": bool(s.get("explanation_stale", False)),
+                "score_at_generation": float(s.get("score_at_generation") or 0),
             }
             for s in signals
         ]
@@ -1883,6 +1885,7 @@ async def mirror_trade(
 
     # ── Position sizing (Finding: hardcoded qty=1, no sizing) ────────────
     alpaca_order_id = None
+    order_data = None  # C1 fix: initialize before try block so error handler can reference it
     symbol = signal["token_symbol"]
     signal_amount_usd = float(signal["amount_usd"] or 0)
     try:
@@ -2030,7 +2033,7 @@ async def mirror_trade(
     # ── Validate Alpaca response before marking executed ────────────────
     if not alpaca_order_id:
         logger.error("Alpaca returned 200 but no order ID for signal %s: %s",
-                     signal_id, order_data)
+                     signal_id, order_data or "no response data")
         async with acquire_db() as conn:
             await conn.execute(
                 """
