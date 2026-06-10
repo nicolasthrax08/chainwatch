@@ -137,6 +137,7 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
             "alert": {
                 "id", "rule_type", "threshold",
                 "enabled", "created_at", "last_fired",
+                "notify_telegram",
             },
         },
     ),
@@ -193,6 +194,25 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
             "score_recency", "score_diversity", "score_signals_used",
             "score_is_coldstart", "median_amount_30d", "execution_rate_30d",
             "db_stored_score", "db_score_calculated_at",
+        },
+    ),
+    # GET /api/signals/history — returns closed signal objects with outcome details
+    # Shape matches backend/main.py get_signal_history() response (lines ~1663-1690)
+    EndpointResponse(
+        name="signal_history",
+        method="GET",
+        path="/api/signals/history",
+        fields={"signals", "count"},
+        nested={
+            "signal": {
+                "id", "token_symbol", "action", "amount_usd",
+                "confidence_score", "confidence_final",
+                "whale_score", "score_at_generation",
+                "wallet_address", "wallet_label",
+                "status", "explanation", "explanation_stale",
+                "created_at", "executed_at", "closed_at",
+                "time_to_close_seconds",
+            },
         },
     ),
     # GET /api/whale-sentiment — returns whale sentiment aggregation

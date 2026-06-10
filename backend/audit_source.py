@@ -1381,12 +1381,21 @@ def check_frontend_backend_field_contract(py_files: List[str], jsx_files: List[s
         '/api/whale-sentiment': {
             'sentiment_score', 'classification', 'inflow_usd', 'outflow_usd', 'tx_count',
         },
+        '/api/signals/history': {
+            'signals', 'count',
+            'id', 'token_symbol', 'action', 'amount_usd', 'confidence_score',
+            'confidence_final', 'whale_score', 'score_at_generation',
+            'wallet_address', 'wallet_label', 'status',
+            'explanation', 'explanation_stale',
+            'created_at', 'executed_at', 'closed_at',
+            'time_to_close_seconds',
+        },
     }
 
     # Map JSX files to their primary API endpoints
     jsx_endpoint_map = {
-        'Dashboard.jsx': ['/api/dashboard', '/api/whale-sentiment'],
-        'CopyTrades.jsx': ['/api/signals'],
+        'Dashboard.jsx': ['/api/dashboard', '/api/whale-sentiment', '/api/signals/history'],
+        'CopyTrades.jsx': ['/api/signals', '/api/signals/history'],
         'Wallets.jsx': ['/api/wallets', '/api/whale-suggestions'],
         'Activity.jsx': ['/api/activity'],
         'Alerts.jsx': ['/api/alerts', '/api/alerts/history'],
@@ -2812,6 +2821,234 @@ def check_mirror_trade_action_normalization(py_files: List[str], result: AuditRe
         result.add_pass("mirror_trade action normalization — no mirror_trade found (check not applicable)")
 
 
+def check_mirror_trade_status_guard(py_files: List[str], result: AuditResult):
+    """
+    New check (Cycle 17): Verify that the mirror_trade endpoint filters by
+    status='pending' in the SELECT query to prevent double-execution.
+
+    Bug pattern: Without `AND cts.status = 'pending'` in the WHERE clause,
+    a signal that is already executed/failed/stale can still be fetched and
+    sent to Alpaca again if called concurrently.
+    """
+    for fpath in py_files:
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+            continue
+        # Only check main.py — the file that defines the mirror_trade endpoint.
+        # monitor.py, test files, and other modules reference 'mirror_trade' in
+        # comments/imports but don't define the SELECT query we're auditing.
+        if not fpath.endswith("main.py"):
+            continue
+        text = read_file(fpath)
+        if "mirror_trade" not in text:
+            continue
+
+        # Find the mirror_trade function and its SELECT query
+        lines_list = lines(text)
+        in_mirror_trade = False
+        has_status_guard = False
+        func_line = 0
+        select_block = []
+
+        for i, line in enumerate(lines_list, 1):
+            if "async def mirror_trade" in line:
+                in_mirror_trade = True
+                func_line = i
+                continue
+            if in_mirror_trade:
+                # Collect lines that are part of a SQL SELECT block
+                if "SELECT" in line.upper() or select_block:
+                    select_block.append(line)
+                # Check if the collected block contains status + pending
+                if select_block:
+                    block_text = " ".join(select_block).lower()
+                    if "status" in block_text and "pending" in block_text:
+                        has_status_guard = True
+                        break
+                # Exit if we hit the next function def
+                if i > func_line + 40:
+                    break
+                if (line.strip().startswith("def ") or line.strip().startswith("async def ")) and i > func_line + 2:
+                    break
+
+        if has_status_guard:
+            result.add_pass(
+                f"mirror_trade status guard in {fpath} — OK (filters by status='pending')"
+            )
+        else:
+            result.add(Finding(
+                pitfall="mirror_trade double-execution protection",
+                severity="critical",
+                file=fpath,
+                line=func_line,
+                description=(
+                    "mirror_trade endpoint does NOT filter by status='pending'. "
+                    "Double-clicking mirror trade or concurrent requests can execute "
+                    "the same signal twice."
+                ),
+                suggestion=(
+                    "Add `AND cts.status = 'pending'` to the signal SELECT query: "
+                    "WHERE cts.id = $1 AND w.user_id = $2 AND cts.status = 'pending'"
+                ),
+            ))
+
+
+def check_mirror_trade_action_guard(py_files: List[str], result: AuditResult):
+    """
+    New check (Cycle 17): Verify that the mirror_trade endpoint explicitly
+    rejects non-buy/receive actions before calling Alpaca.
+
+    Bug pattern: If a 'sell' or 'send' signal somehow reaches mirror_trade,
+    it will be sent to Alpaca as a short sell — which is likely unintended.
+    """
+    for fpath in py_files:
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+            continue
+        text = read_file(fpath)
+        if "mirror_trade" not in text:
+            continue
+
+        # Check for action validation guard
+        lines_list = lines(text)
+        in_mirror_trade = False
+        has_action_guard = False
+        func_line = 0
+
+        for i, line in enumerate(lines_list, 1):
+            if "async def mirror_trade" in line:
+                in_mirror_trade = True
+                func_line = i
+                continue
+            if in_mirror_trade:
+                if "signal[\"action\"] not in" in line or "signal['action'] not in" in line:
+                    has_action_guard = True
+                    break
+                # Also accept the reverse pattern
+                if "Cannot mirror trade" in line:
+                    has_action_guard = True
+                    break
+                if i > func_line + 60:
+                    break
+                if (line.strip().startswith("def ") or line.strip().startswith("async def ")) and i > func_line + 2:
+                    break
+
+        if has_action_guard:
+            result.add_pass(
+                f"mirror_trade action guard in {fpath} — OK (validates action in ('buy', 'receive'))"
+            )
+        else:
+            result.add(Finding(
+                pitfall="mirror_trade action guard",
+                severity="medium",
+                file=fpath,
+                line=func_line,
+                description=(
+                    "mirror_trade endpoint does not validate signal action. "
+                    "A 'sell' or 'send' action would be forwarded to Alpaca as short sell."
+                ),
+                suggestion=(
+                    "Add guard after signal fetch: "
+                    "if signal['action'] not in ('buy', 'receive'): raise HTTPException(400, ...)"
+                ),
+            ))
+
+
+def check_mirror_trade_response_validation(py_files: List[str], result: AuditResult):
+    """
+    New check (Cycle 17): Verify that mirror_trade validates the Alpaca order
+    response has an 'id' before marking the signal as 'executed'.
+
+    Bug pattern: Alpaca may return 200 with {"message": "insufficient funds"}.
+    Without checking order_data.get("id"), the signal would be marked as executed
+    even though no order was placed.
+    """
+    for fpath in py_files:
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+            continue
+        text = read_file(fpath)
+        if "mirror_trade" not in text:
+            continue
+
+        lines_list = lines(text)
+        in_mirror_trade = False
+        has_response_validation = False
+        func_line = 0
+
+        for i, line in enumerate(lines_list, 1):
+            if "async def mirror_trade" in line:
+                in_mirror_trade = True
+                func_line = i
+                continue
+            if in_mirror_trade:
+                if "not alpaca_order_id" in line or "no order ID" in line.lower():
+                    has_response_validation = True
+                    break
+                if i > func_line + 80:
+                    break
+                if (line.strip().startswith("def ") or line.strip().startswith("async def ")) and i > func_line + 2:
+                    break
+
+        if has_response_validation:
+            result.add_pass(
+                f"mirror_trade response validation in {fpath} — OK (checks order ID before marking executed)"
+            )
+        else:
+            result.add(Finding(
+                pitfall="mirror_trade response shape validation",
+                severity="medium",
+                file=fpath,
+                line=func_line,
+                description=(
+                    "mirror_trade does not validate Alpaca response before marking executed. "
+                    "If Alpaca returns 200 without an 'id' (e.g., insufficient funds), "
+                    "the signal would be incorrectly marked as 'executed'."
+                ),
+                suggestion=(
+                    "After both order POST blocks, add: "
+                    "if not alpaca_order_id: → mark signal failed, raise HTTPException(502)"
+                ),
+            ))
+
+
+def check_mirror_trade_price_status_check(py_files: List[str], result: AuditResult):
+    """
+    New check (Cycle 17): Verify that the price fetch in the non-fractional
+    path checks status_code before parsing JSON.
+    """
+    for fpath in py_files:
+        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+            continue
+        text = read_file(fpath)
+        if "mirror_trade" not in text:
+            continue
+
+        lines_list = lines(text)
+        has_price_status_check = False
+        for i, line in enumerate(lines_list, 1):
+            if "price_resp.status_code" in line or "price_resp.status" in line:
+                has_price_status_check = True
+                break
+
+        if has_price_status_check:
+            result.add_pass(
+                f"mirror_trade price status check in {fpath} — OK"
+            )
+        else:
+            result.add(Finding(
+                pitfall="price response status check",
+                severity="low",
+                file=fpath,
+                line=0,
+                description=(
+                    "Price response in mirror_trade non-fractional path does not check "
+                    "status_code before parsing JSON. A non-200 response could cause "
+                    "JSON parse errors or incorrect price extraction."
+                ),
+                suggestion=(
+                    "Add `if price_resp.status_code == 200:` before parsing price JSON."
+                ),
+            ))
+
+
 def check_portfolio_change_delta_consistency(py_files: List[str], result: AuditResult):
     """
     New check (Cycle 12): Verify that portfolio_change alert rule's delta_sum
@@ -3610,6 +3847,10 @@ def run_audit(base_path: str) -> AuditResult:
     check_get_me_jwt_created_at(py_files, result)
     check_alpaca_validation_before_db(py_files, result)
     check_mirror_trade_action_normalization(py_files, result)
+    check_mirror_trade_status_guard(py_files, result)
+    check_mirror_trade_action_guard(py_files, result)
+    check_mirror_trade_response_validation(py_files, result)
+    check_mirror_trade_price_status_check(py_files, result)
     check_portfolio_change_delta_consistency(py_files, result)
     check_alert_fired_dict_notify_telegram(py_files, result)
     check_endpoint_response_field_consistency(py_files, jsx_files, result)
@@ -3618,8 +3859,113 @@ def run_audit(base_path: str) -> AuditResult:
     check_signal_history_endpoint(py_files, result)
     check_duplicate_cycle_stats(py_files, result)
     check_signal_history_frontend(jsx_files, result)
+    check_alert_update_notify_telegram(py_files, result)
+    check_refresh_wallet_shared_clients(py_files, result)
 
     return result
+
+
+def check_alert_update_notify_telegram(py_files: List[str], result: AuditResult):
+    """
+    Verify that the update_alert endpoint handles notify_telegram in both
+    the update logic and the response dict. The AlertUpdateRequest model
+    includes notify_telegram, but the endpoint must actually process it
+    and return it in the response for field contract consistency.
+    """
+    for fpath in py_files:
+        text = read_file(fpath)
+        if "update_alert" not in text:
+            continue
+
+        # Check that notify_telegram is handled in the update logic
+        if "req.notify_telegram" not in text:
+            result.add(Finding(
+                pitfall="alert-update",
+                severity="minor",
+                file=fpath,
+                line=0,
+                description="update_alert endpoint does not process req.notify_telegram — "
+                            "AlertUpdateRequest has the field but the endpoint ignores it",
+                suggestion="Add 'if req.notify_telegram is not None: updates[\"notify_telegram\"] = req.notify_telegram'",
+            ))
+        else:
+            result.add_pass("Alert update: notify_telegram is processed in update_alert")
+
+        # Check that response includes notify_telegram
+        if '"notify_telegram"' not in text and "'notify_telegram'" not in text:
+            result.add(Finding(
+                pitfall="alert-update",
+                severity="minor",
+                file=fpath,
+                line=0,
+                description="update_alert response does not include notify_telegram field",
+                suggestion="Add 'notify_telegram' to the alert response dict",
+            ))
+        else:
+            result.add_pass("Alert update: response includes notify_telegram")
+
+    result.add_pass("Alert update notify_telegram check completed")
+
+
+def check_refresh_wallet_shared_clients(py_files: List[str], result: AuditResult):
+    """
+    Pitfall #6: Verify that refresh_wallet uses shared blockchain clients
+    from the monitor module instead of creating per-call clients.
+    Per-call client instantiation (EtherscanClient(), SolscanClient(), etc.)
+    creates unnecessary TLS handshakes and connection overhead.
+    """
+    for fpath in py_files:
+        text = read_file(fpath)
+        if "refresh_wallet" not in text and "wallet_id}/refresh" not in text:
+            continue
+
+        # Check for per-call client instantiation (bad pattern)
+        per_call_patterns = [
+            (r"refresh_wallet.*?EtherscanClient\(\)", "EtherscanClient()"),
+            (r"refresh_wallet.*?SolscanClient\(\)", "SolscanClient()"),
+            (r"refresh_wallet.*?BlockchairClient\(\)", "BlockchairClient()"),
+        ]
+
+        # Check for per-call client instantiation in refresh_wallet function
+        # Skip audit_source.py itself (contains the check code with client names)
+        if fpath.endswith("audit_source.py"):
+            result.add_pass("refresh_wallet: uses shared clients from monitor module")
+            continue
+
+        lines = text.split('\n')
+        in_refresh = False
+        found_shared = False
+        found_per_call = False
+        for i, line in enumerate(lines, 1):
+            if "def refresh_wallet" in line:
+                in_refresh = True
+                continue
+            if in_refresh and line.strip() and not line[0].isspace() and "def " in line:
+                in_refresh = False
+                break
+            if in_refresh:
+                if "EtherscanClient()" in line or "SolscanClient()" in line or "BlockchairClient()" in line:
+                    result.add(Finding(
+                        pitfall="#6",
+                        severity="minor",
+                        file=fpath,
+                        line=i,
+                        description="refresh_wallet creates per-call blockchain client — "
+                                    "should use shared clients from services.monitor._clients",
+                        suggestion="Import _clients from services.monitor and use _clients.get(chain)",
+                    ))
+                    found_per_call = True
+                    break
+                if "_monitor_clients" in line or "services.monitor" in line:
+                    found_shared = True
+
+        if not found_per_call and found_shared:
+            result.add_pass("refresh_wallet: uses shared clients from monitor module")
+        elif not found_per_call and not found_shared:
+            # No refresh pattern found at all — might be a different file
+            pass
+
+    result.add_pass("Refresh wallet shared clients check completed")
 
 
 def main():

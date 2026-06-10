@@ -964,6 +964,10 @@ async def add_wallet(
             """
             INSERT INTO wallets (user_id, address, chain, label, is_whale, is_mine)
             VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (user_id, address) DO UPDATE SET
+                label = EXCLUDED.label,
+                is_whale = EXCLUDED.is_whale,
+                is_mine = EXCLUDED.is_mine
             RETURNING *
             """,
             user["id"],
@@ -981,7 +985,16 @@ async def add_wallet(
             "label": wallet["label"],
             "is_whale": wallet["is_whale"],
             "is_mine": wallet["is_mine"],
-            "created_at": wallet["created_at"].isoformat()
+            "created_at": wallet["created_at"].isoformat(),
+            # Include balance fields for consistency with list_wallets response
+            "balance_usd": float(wallet["balance_usd"]) if wallet.get("balance_usd") is not None else None,
+            "balance_hkd": float(wallet["balance_hkd"]) if wallet.get("balance_hkd") is not None else None,
+            "balance_btc": float(wallet["balance_btc"]) if wallet.get("balance_btc") is not None else None,
+            "last_balance_update": (
+                wallet["last_balance_update"].isoformat()
+                if wallet.get("last_balance_update")
+                else None
+            ),
         }
     }
 
@@ -1009,6 +1022,11 @@ async def update_wallet(
             updates["is_mine"] = req.is_mine
 
         if updates:
+            # Defense-in-depth: whitelist allowed columns to prevent SQL injection
+            # via f-string SQL construction (Pitfall #31 adjacent / M-1).
+            _ALLOWED_WALLET_UPDATE_COLS = frozenset({"label", "is_whale", "is_mine"})
+            if not all(k in _ALLOWED_WALLET_UPDATE_COLS for k in updates):
+                raise HTTPException(status_code=400, detail="Invalid update fields")
             set_clauses = ", ".join(f"{k} = ${i+3}" for i, k in enumerate(updates))
             values = list(updates.values())
             # Fix Pitfall #8: Use RETURNING * instead of separate SELECT to avoid
@@ -1029,7 +1047,16 @@ async def update_wallet(
             "label": updated["label"],
             "is_whale": updated["is_whale"],
             "is_mine": updated["is_mine"],
-            "created_at": updated["created_at"].isoformat()
+            "created_at": updated["created_at"].isoformat(),
+            # Include balance fields for consistency with list_wallets response
+            "balance_usd": float(updated["balance_usd"]) if updated.get("balance_usd") is not None else None,
+            "balance_hkd": float(updated["balance_hkd"]) if updated.get("balance_hkd") is not None else None,
+            "balance_btc": float(updated["balance_btc"]) if updated.get("balance_btc") is not None else None,
+            "last_balance_update": (
+                updated["last_balance_update"].isoformat()
+                if updated.get("last_balance_update")
+                else None
+            ),
         }
     }
 
@@ -1063,28 +1090,34 @@ async def refresh_wallet(
     if not wallet:
         raise HTTPException(status_code=404, detail="Wallet not found")
 
-    # Fetch live balance via blockchain client
-    from services.blockchain import EtherscanClient, SolscanClient, BlockchairClient
-
     chain = wallet["chain"]
     addr = wallet["address"]
-    balance_native = 0.0
     symbol = chain.upper()
 
-    client = None
+    # Fetch live balance via blockchain client
+    # Use the shared clients from the monitor module (Pitfall #6 fix:
+    # avoid per-call client instantiation which creates unnecessary TLS
+    # handshakes and connection overhead).
+    try:
+        from services.monitor import _clients as _monitor_clients
+        client = _monitor_clients.get(chain)
+        if client is None:
+            raise HTTPException(status_code=503, detail=f"Blockchain client for '{chain}' not available — monitor may not be running")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Blockchain client not available: {e}")
+
     try:
         if chain == "eth":
-            client = EtherscanClient()
             bal = await client.get_eth_balance(addr)
             balance_native = bal.get("balance_eth", 0)
             symbol = "ETH"
         elif chain == "sol":
-            client = SolscanClient()
             bal = await client.get_balance(addr)
             balance_native = bal.get("balance_sol", 0)
             symbol = "SOL"
         elif chain == "btc":
-            client = BlockchairClient()
             bal = await client.get_balance(addr)
             balance_native = bal.get("balance_btc", 0)
             symbol = "BTC"
@@ -1092,13 +1125,6 @@ async def refresh_wallet(
             raise HTTPException(status_code=400, detail=f"Unsupported chain: {chain}")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Balance fetch failed: {e}")
-    finally:
-        # Always close the client to avoid connection leaks
-        if client is not None:
-            try:
-                await client.close()
-            except Exception:
-                pass
 
     # Convert to USD using live CoinGecko price for the specific token
     # (Pitfall: using _APPROX_PRICE_USD here would produce stale USD values
@@ -1427,6 +1453,8 @@ async def update_alert(
             updates["threshold"] = req.threshold
         if req.enabled is not None:
             updates["enabled"] = req.enabled
+        if req.notify_telegram is not None:
+            updates["notify_telegram"] = req.notify_telegram
 
         if updates:
             set_clauses = ", ".join(f"{k} = ${i+3}" for i, k in enumerate(updates))
@@ -1446,6 +1474,7 @@ async def update_alert(
             "rule_type": updated["rule_type"],
             "threshold": float(updated["threshold"] or 0),
             "enabled": updated["enabled"],
+            "notify_telegram": updated.get("notify_telegram", True),
             "created_at": updated["created_at"].isoformat()
         }
     }
@@ -1749,13 +1778,20 @@ async def mirror_trade(
             SELECT cts.*, w.address as wallet_address
             FROM copy_trade_signals cts
             JOIN wallets w ON w.id = cts.wallet_id
-            WHERE cts.id = $1 AND w.user_id = $2
+            WHERE cts.id = $1 AND w.user_id = $2 AND cts.status = 'pending'
             """,
             signal_id, user["id"]
         )
 
     if not signal:
-        raise HTTPException(status_code=404, detail="Signal not found")
+        raise HTTPException(status_code=404, detail="Signal not found or already processed")
+
+    # ── Validate signal action ──────────────────────────────────────────
+    if signal["action"] not in ("buy", "receive"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot mirror trade a '{signal['action']}' signal — only 'buy' and 'receive' are supported"
+        )
 
     # ── Per-user Alpaca credentials ────────────────────────────────────
     alpaca_key: str | None = None
@@ -1873,7 +1909,10 @@ async def mirror_trade(
                         },
                         timeout=10,
                     )
-                    current_price = float(price_resp.json().get("trade", {}).get("p", 0))
+                    if price_resp.status_code == 200:
+                        current_price = float(price_resp.json().get("trade", {}).get("p", 0))
+                    else:
+                        current_price = 0
                 except Exception:
                     current_price = 0
                 if current_price > 0:
@@ -1944,6 +1983,24 @@ async def mirror_trade(
                 signal_id
             )
         raise HTTPException(status_code=502, detail="Mirror trade failed due to an internal error")
+
+    # ── Validate Alpaca response before marking executed ────────────────
+    if not alpaca_order_id:
+        logger.error("Alpaca returned 200 but no order ID for signal %s: %s",
+                     signal_id, order_data if 'order_data' in dir() else 'N/A')
+        async with acquire_db() as conn:
+            await conn.execute(
+                """
+                UPDATE copy_trade_signals
+                SET status = 'failed', closed_at = NOW()
+                WHERE id = $1
+                """,
+                signal_id
+            )
+        raise HTTPException(
+            status_code=502,
+            detail="Alpaca returned success but no order ID — signal not executed"
+        )
 
     async with acquire_db() as conn:
         await conn.execute(
