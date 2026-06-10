@@ -506,6 +506,10 @@ def check_start_monitor_wired(py_files: List[str], result: AuditResult):
     )
 
     for fpath in py_files:
+        # Skip test files — they call start_monitor() in test methods
+        # but correctly have no @app.on_event('startup') decorator.
+        if "/test" in fpath or fpath.startswith("test") or fpath.startswith("./test"):
+            continue
         text = read_file(fpath)
         if "start_monitor" not in text:
             continue
