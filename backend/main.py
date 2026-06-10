@@ -90,6 +90,41 @@ ALPACA_ALLOW_SHARED_KEYS = os.environ.get(
 # Rough reference prices for whale-classification native amount estimation (F5)
 _APPROX_PRICE_USD = {"btc": 105000.0, "eth": 2500.0, "sol": 170.0}
 
+# ── Mirror trade rate limiter (token bucket) ────────────────────────────
+# Prevents abuse of the Alpaca paper-trading endpoint.
+# 10 requests per 60-second window per user, with a burst allowance of 5.
+_MIRROR_RATE_LIMIT = 10          # max requests per window
+_MIRROR_RATE_WINDOW = 60.0       # window in seconds
+_MIRROR_RATE_BURST = 5           # max burst above rate
+_mirror_rate_buckets: dict = {}  # user_id -> (tokens, last_refill_ts)
+
+
+def _check_mirror_rate_limit(user_id: str) -> bool:
+    """
+    Token-bucket rate limiter for mirror trade endpoint.
+    Returns True if the request is allowed, False if rate-limited.
+    """
+    import time as _time
+    now = _time.monotonic()
+    if user_id not in _mirror_rate_buckets:
+        _mirror_rate_buckets[user_id] = (
+            float(_MIRROR_RATE_BURST),
+            now,
+        )
+    tokens, last_refill = _mirror_rate_buckets[user_id]
+    # Refill tokens proportional to elapsed time
+    elapsed = now - last_refill
+    tokens = min(
+        float(_MIRROR_RATE_BURST),
+        tokens + elapsed * (_MIRROR_RATE_LIMIT / _MIRROR_RATE_WINDOW),
+    )
+    if tokens < 1.0:
+        _mirror_rate_buckets[user_id] = (tokens, now)
+        return False
+    tokens -= 1.0
+    _mirror_rate_buckets[user_id] = (tokens, now)
+    return True
+
 # ── Dashboard price cache (for currency conversion) ────────────────────
 # Module-level cache: refreshed every 120 s to avoid CoinGecko rate limits
 _dashboard_price_cache: dict = {
@@ -1773,6 +1808,13 @@ async def mirror_trade(
     EQUITY_PCT = 0.02
     MIN_NOTIONAL = 1.00
 
+    # ── Rate limit check ───────────────────────────────────────────────
+    if not _check_mirror_rate_limit(user["id"]):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded: max 10 mirror trades per minute. Please wait and try again.",
+        )
+
     async with acquire_db() as conn:
         signal = await conn.fetchrow(
             """
@@ -1988,7 +2030,7 @@ async def mirror_trade(
     # ── Validate Alpaca response before marking executed ────────────────
     if not alpaca_order_id:
         logger.error("Alpaca returned 200 but no order ID for signal %s: %s",
-                     signal_id, order_data if 'order_data' in dir() else 'N/A')
+                     signal_id, order_data)
         async with acquire_db() as conn:
             await conn.execute(
                 """

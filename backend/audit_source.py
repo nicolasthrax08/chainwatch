@@ -3863,6 +3863,7 @@ def run_audit(base_path: str) -> AuditResult:
     check_refresh_wallet_shared_clients(py_files, result)
     check_whale_sentiment_buy_inflow(py_files, result)
     check_signal_stats_field_contract(py_files, result)
+    check_mirror_trade_rate_limit(py_files, result)
 
     return result
 
@@ -4063,6 +4064,68 @@ def check_refresh_wallet_shared_clients(py_files: List[str], result: AuditResult
             pass
 
     result.add_pass("Refresh wallet shared clients check completed")
+
+
+def check_mirror_trade_rate_limit(py_files: List[str], result: AuditResult):
+    """Audit check: POST /api/signals/{signal_id}/mirror must have rate limiting."""
+    import re
+    found_rate_limit = False
+    found_dir_pattern = False
+
+    for fpath in py_files:
+        try:
+            src = open(fpath).read()
+        except Exception:
+            continue
+
+        # Check for rate limiter in mirror_trade endpoint
+        if "mirror_trade" in src or "mirror" in src.lower():
+            if "_check_mirror_rate_limit" in src or "_MIRROR_RATE_LIMIT" in src:
+                found_rate_limit = True
+
+        # Check for fragile dir() pattern (skip self — audit_source.py)
+        # Match: some_var if 'some_var' in dir() else fallback
+        # The pattern must have a variable name before 'if' and the same name in quotes
+        if "audit_source.py" not in fpath and re.search(r"\w+\s+if\s+'(\w+)'\s+in\s+dir\(\)", src):
+            found_dir_pattern = True
+            # Find approximate line number
+            lines = src.splitlines()
+            line_num = 0
+            for i, line in enumerate(lines, 1):
+                if re.search(r"\w+\s+if\s+'(\w+)'\s+in\s+dir\(\)", line):
+                    line_num = i
+                    break
+            result.add(Finding(
+                pitfall="fragile-dir-pattern",
+                severity="minor",
+                file=fpath,
+                line=line_num,
+                description=(
+                    "Fragile 'var if 'var' in dir() else default' pattern detected. "
+                    "This is unnecessary when the variable is always in scope."
+                ),
+                suggestion=(
+                    "Replace with the variable directly, or use a try/except "
+                    "if the variable may not be defined."
+                ),
+            ))
+
+    if found_rate_limit:
+        result.add_pass("Mirror trade endpoint has rate limiting (token bucket)")
+    else:
+        result.add(Finding(
+            pitfall="mirror-rate-limit",
+            severity="minor",
+            file="backend/main.py",
+            line=0,
+            description=(
+                "POST /api/signals/{signal_id}/mirror has no rate limiting. "
+                "An attacker or buggy client could spam Alpaca orders."
+            ),
+            suggestion=(
+                "Add a per-user token-bucket rate limiter (e.g., 10 req/min)."
+            ),
+        ))
 
 
 def main():
