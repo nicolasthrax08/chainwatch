@@ -1421,7 +1421,7 @@ def check_frontend_backend_field_contract(py_files: List[str], jsx_files: List[s
         },
         '/api/alerts/history': {
             'history',
-            'id', 'alert_id', 'rule_type', 'trigger_value', 'details', 'created_at',
+            'id', 'alert_id', 'rule_type', 'trigger_value', 'details', 'message', 'created_at',
         },
         '/api/whale-sentiment': {
             'sentiment_score', 'classification', 'inflow_usd', 'outflow_usd', 'tx_count',

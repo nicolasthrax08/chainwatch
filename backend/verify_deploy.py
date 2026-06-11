@@ -101,6 +101,7 @@ REQUIRED_UNIQUE_CONSTRAINTS = [
     ("uq_users_wallet_address", "users"),
     ("uq_whale_suggestions_chain_address", "whale_suggestions"),
     ("uq_copy_trade_signals_dedup", "copy_trade_signals"),
+    ("uq_fired_alerts_alert_trigger", "fired_alerts"),
 ]
 
 
