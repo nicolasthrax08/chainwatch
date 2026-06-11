@@ -201,11 +201,12 @@ def check_on_conflict_has_constraint(py_files: List[str], sql_files: List[str], 
                 ))
         else:
             # Explicit conflict target: check for matching constraint
-            found = any(cols_clean in c or c in cols_clean for c in all_constraint_cols)
+            # Use exact match to avoid substring false positives (e.g., "id" in "id,address,chain")
+            found = any(cols_clean == c for c in all_constraint_cols)
             if not found:
                 # Also check table-specific constraints
                 table_constraints = constraints_by_table.get(table_lower, set())
-                found = any(cols_clean in c or c in cols_clean for c in table_constraints)
+                found = any(cols_clean == c for c in table_constraints)
             if not found:
                 result.add(Finding(
                     pitfall="#19",
@@ -421,14 +422,24 @@ def check_cache_initialized_nonzero(py_files: List[str], result: AuditResult):
     Pitfall #5: Cache variables used as multipliers should not be initialized to 0.
     """
     for fpath in py_files:
+        # Skip test files — they contain mock data, not real cache initialization
+        fpath_norm = fpath.replace("\\", "/")
+        fpath_parts = fpath_norm.split("/")
+        is_test_file = (
+            "tests" in fpath_parts
+            or fpath.endswith(("_test.py", "_tests.py"))
+        )
+        if is_test_file:
+            continue
         text = read_file(fpath)
         # Look for dict initializations with 0.0 values that look like price/rate caches
+        # Matches both bare keys (KEY: 0.0) and quoted keys ("ETH": 0.0)
         zero_cache_pattern = re.compile(
-            r"(\w+)\s*:\s*0\.0\s*,?\s*(?:#.*(?:price|rate|cache|threshold|multiplier))",
+            r"(?:\"(\w+)\"|'(\w+)'|(\w+))\s*:\s*0\.0\s*,?\s*(?:#.*(?:price|rate|cache|threshold|multiplier))",
             re.IGNORECASE,
         )
         for m in zero_cache_pattern.finditer(text):
-            var_name = m.group(1)
+            var_name = m.group(1) or m.group(2) or m.group(3)
             line_num = text[:m.start()].count("\n") + 1
             result.add(Finding(
                 pitfall="#5",
@@ -458,7 +469,7 @@ def check_ws_auth_before_accept(py_files: List[str], result: AuditResult):
             continue
 
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name:
                 func_text = ast.get_source_segment(text, node) or ""
                 if "websocket" not in func_text.lower() and "ws" not in func_text.lower():
                     continue
@@ -508,7 +519,16 @@ def check_start_monitor_wired(py_files: List[str], result: AuditResult):
     for fpath in py_files:
         # Skip test files — they call start_monitor() in test methods
         # but correctly have no @app.on_event('startup') decorator.
-        if "/test" in fpath or fpath.startswith("test") or fpath.startswith("./test"):
+        # Match "tests" or "test" as a path segment (e.g., .../tests/test_x.py),
+        # but NOT substrings like /tmp/pytest-of-hermes/... or /tmp/pytest-0/test_xxx/
+        # which are pytest temp dirs, not project test files.
+        fpath_norm = fpath.replace("\\", "/")
+        fpath_parts = fpath_norm.split("/")
+        is_test_file = (
+            "tests" in fpath_parts
+            or fpath.endswith(("_test.py", "_tests.py"))
+        )
+        if is_test_file:
             continue
         text = read_file(fpath)
         if "start_monitor" not in text:
@@ -652,9 +672,11 @@ def check_unbounded_state_dicts(py_files: List[str], result: AuditResult):
     Finds module-level dicts that are written to (via .update, [], etc.) but
     never pruned — they grow without bound, causing memory leaks.
     """
-    # Known pruner function names that indicate the dict IS managed
+    # Known pruner function names that indicate the dict IS managed.
+    # Must be a function DEF containing one of these keywords — not just
+    # any occurrence of the keyword in variable names or comments.
     pruner_patterns = re.compile(
-        r"def\s+_(?:prune|cleanup|evict|expire).*cache|cooldown|dedup|state",
+        r"def\s+_(?:prune|cleanup|evict|expire)(?:.*?(?:cache|cooldown|dedup|state))?",
         re.IGNORECASE,
     )
 
@@ -680,22 +702,41 @@ def check_unbounded_state_dicts(py_files: List[str], result: AuditResult):
 
         for line_num, var_name in dict_inits:
             # Check if this dict is written to anywhere
-            write_pattern = re.compile(rf"\b{re.escape(var_name)}\b\s*(?:\[|\.update|\.setdefault|\.pop)\s*\(")
+            # Match subscript writes (d[key] =), method calls (d.update(), d.setdefault(), d.pop()),
+            # and .append() for list values inside the dict
+            write_pattern = re.compile(
+                rf"\b{re.escape(var_name)}\b\s*(?:\[[^\]]+\]\s*=|\.update|\.setdefault|\.pop|\.append)\s*\("
+            )
             is_written = write_pattern.search(text)
+            if not is_written:
+                # Also match subscript assignment without ( (e.g., d[key] = value)
+                subscript_write = re.compile(rf"\b{re.escape(var_name)}\b\s*\[[^\]]+\]\s*=")
+                is_written = subscript_write.search(text)
             if not is_written:
                 continue  # Read-only dicts are fine
 
             # Check if there's a pruning mechanism
             if has_pruner:
-                # Verify the pruner actually references this dict
-                pruner_refs = re.compile(rf"def\s+_(?:prune|cleanup|evict|expire).*\b{re.escape(var_name)}\b")
-                if pruner_refs.search(text):
+                # Verify the pruner actually references this dict.
+                # Two patterns:
+                #   1. def _prune_X(...): ... X ...  (var referenced in body)
+                #   2. def _prune_X(): ...          (function name contains the var name)
+                # Pattern 1: var appears somewhere after a prune-def on a subsequent line
+                pruner_refs = re.compile(
+                    rf"def\s+_(?:prune|cleanup|evict|expire)\w*\b[^}}]*?\b{re.escape(var_name)}\b",
+                    re.DOTALL,
+                )
+                # Pattern 2: function name itself contains the var name (e.g., _prune_cooldown_cache for _cooldown_cache)
+                pruner_name = re.compile(
+                    rf"def\s+_(?:prune|cleanup|evict|expire)[^)]*{re.escape(var_name)}",
+                )
+                if pruner_refs.search(text) or pruner_name.search(text):
                     continue  # Dict has a dedicated pruner — OK
-                # Fall through: pruner exists but doesn't reference this dict
+                # Fall through: pruner exists but doesn't reference this dict → minor
 
             result.add(Finding(
                 pitfall="#12",
-                severity="minor",
+                severity="critical" if not has_pruner else "minor",
                 file=fpath,
                 line=line_num,
                 description=(
@@ -1728,7 +1769,7 @@ def check_get_current_user_no_db(py_files: List[str], result: AuditResult):
                     if has_db_select and not has_jwt_uid_extract:
                         result.add(Finding(
                             pitfall="#21",
-                            severity="minor",
+                            severity="critical",
                             file=fpath,
                             line=func_start,
                             description=(
@@ -1756,7 +1797,7 @@ def check_get_current_user_no_db(py_files: List[str], result: AuditResult):
                 if re.search(r"(SELECT|fetch|execute)\b", line, re.IGNORECASE):
                     if re.search(r"(users|wallet_address|WHERE\s+\w+\s*=\s*\$)", line, re.IGNORECASE):
                         has_db_select = True
-                if re.search(r"(uid|user_id|sub)\b", line) and re.search(r"(jwt|payload|claims|token)", line, re.IGNORECASE):
+                if re.search(r"(uid|user_id)\b", line) and re.search(r"(jwt|payload|claims|token)", line, re.IGNORECASE):
                     has_jwt_uid_extract = True
 
         # Handle function at end of file
@@ -1765,7 +1806,7 @@ def check_get_current_user_no_db(py_files: List[str], result: AuditResult):
             if has_db_select and not has_jwt_uid_extract:
                 result.add(Finding(
                     pitfall="#21",
-                    severity="minor",
+                    severity="critical",
                     file=fpath,
                     line=func_start,
                     description=(
@@ -1956,7 +1997,7 @@ def check_db_conn_held_across_http(py_files: List[str], result: AuditResult):
                 if has_db_write and has_external_http:
                     result.add(Finding(
                         pitfall="#7",
-                        severity="minor",
+                        severity="critical",
                         file=fpath,
                         line=async_with_line,
                         description=(
@@ -1980,17 +2021,17 @@ def check_db_conn_held_across_http(py_files: List[str], result: AuditResult):
 
             # Inside the block — check for HTTP calls and DB writes
             # Match actual HTTP client method calls (not imports or dict.get())
-            # Pattern: variable.get/post/put/delete/patch(  where variable looks like an HTTP client
-            if re.search(r"(await\s+)?(client|session|http_client|resp|response|cl)\.(get|post|put|delete|patch)\(", line):
+            # Pattern: variable.get/post/put/delete/patch( where variable looks like an HTTP client
+            if re.search(r"(await\s+)?(client|session|http_client|resp|response|cl|httpx|http)\.(get|post|put|delete|patch)\(", line):
                 has_external_http = True
-            if re.search(r"(INSERT|UPDATE|DELETE|execute|fetch)\b", line, re.IGNORECASE):
+            if re.search(r"(INSERT|UPDATE|DELETE|execute|fetch)\w*\b", line, re.IGNORECASE):
                 has_db_write = True
 
         # Handle block at end of file
         if in_async_with and has_db_write and has_external_http:
             result.add(Finding(
                 pitfall="#7",
-                severity="minor",
+                severity="critical",
                 file=fpath,
                 line=async_with_line,
                 description=(

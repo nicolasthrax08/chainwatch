@@ -473,7 +473,7 @@ def find_frontend_field_accesses(base_path: str) -> List[FieldAccess]:
                             "style", "className", "onClick", "onChange",
                             "value", "key", "id", "type", "label",
                             "name", "ref", "children", "prev", "next",
-                            "current", "target", "data", "result",
+                            "current", "target", "result",
                             "response", "status", "message", "code",
                             "length", "toString", "toFixed", "toLocaleString",
                             "getTime", "getFullYear", "getMonth", "getDate",
