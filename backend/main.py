@@ -252,21 +252,67 @@ async def startup():
             "and ALPACA_ALLOW_SHARED_KEYS is not set. Mirror trades will return 402 until users connect."
         )
 
+    # ── DB pool creation with retry + DNS pre-resolution ──
+    # Zeabur internal DNS may not resolve on first attempt during container startup.
+    # We pre-resolve the hostname and retry with backoff to handle transient DNS failures.
+    import socket as _socket
+    from urllib.parse import urlparse as _urlparse
+
+    _db_pool_created = False
+    _db_connect_error = None
+
+    # Parse hostname from DATABASE_URL for DNS pre-resolution
+    _db_host = None
     try:
-        db_pool = await asyncpg.create_pool(
-            DATABASE_URL,
-            min_size=2,
-            max_size=10,
-            command_timeout=30
-        )
-        _log_startup_event("db_pool_created", f"min_size=2 max_size=10")
-        # Instrument the pool for query metrics
-        from services.instrumented_pool import instrument_pool
-        instrument_pool(db_pool)
-        _log_startup_event("db_pool_instrumented")
-    except Exception as e:
-        logger.warning(f"Failed to create DB pool on startup: {e}. API endpoints requiring DB will return 503.")
-        _log_startup_event("db_pool_failed", str(e))
+        _parsed = _urlparse(DATABASE_URL)
+        _db_host = _parsed.hostname
+    except Exception:
+        pass
+
+    # Retry loop: 3 attempts with exponential backoff (1s, 2s, 4s)
+    for _attempt in range(3):
+        if _attempt > 0:
+            _backoff = 2 ** (_attempt - 1)
+            logger.info(f"DB connection retry attempt {_attempt + 1}/3 after {_backoff}s backoff...")
+            await asyncio.sleep(_backoff)
+
+        # Pre-resolve DNS on each attempt (handles transient DNS failures)
+        if _db_host:
+            try:
+                _socket.getaddrinfo(_db_host, None)
+                logger.debug(f"DNS pre-resolution succeeded for {_db_host}")
+            except Exception as _dns_err:
+                logger.warning(f"DNS pre-resolution failed for {_db_host}: {_dns_err}")
+                _db_connect_error = str(_dns_err)
+                if _attempt < 2:
+                    continue  # retry after backoff
+
+        try:
+            db_pool = await asyncpg.create_pool(
+                DATABASE_URL,
+                min_size=2,
+                max_size=10,
+                command_timeout=30,
+                # server_settings ensures the connection is alive before use
+                server_settings={
+                    "application_name": "chainwatch",
+                },
+            )
+            _log_startup_event("db_pool_created", f"min_size=2 max_size=10 attempt={_attempt + 1}")
+            # Instrument the pool for query metrics
+            from services.instrumented_pool import instrument_pool
+            instrument_pool(db_pool)
+            _log_startup_event("db_pool_instrumented")
+            _db_pool_created = True
+            break  # success — exit retry loop
+        except Exception as e:
+            _db_connect_error = str(e)
+            logger.warning(f"DB pool creation attempt {_attempt + 1}/3 failed: {e}")
+            _log_startup_event("db_pool_attempt_failed", f"attempt={_attempt + 1} error={e}")
+
+    if not _db_pool_created:
+        logger.warning(f"Failed to create DB pool after 3 attempts: {_db_connect_error}. API endpoints requiring DB will return 503.")
+        _log_startup_event("db_pool_failed", _db_connect_error or "unknown error")
         db_pool = None
 
     # Launch the background wallet monitor
@@ -2452,6 +2498,27 @@ async def health_check():
 
     status_code = 200 if critical_ok else 503
     return JSONResponse(content=report, status_code=status_code)
+
+
+@app.get("/api/health/metrics")
+async def health_metrics_endpoint():
+    """
+    Expose per-endpoint latency percentiles and error rates collected by
+    MetricsMiddleware + health_metrics. Useful for the cron job and operators
+    to spot slow endpoints before they cause timeouts.
+
+    Returns:
+        uptime, total request/error counts, and per-endpoint p50/p95/p99 latency.
+    """
+    try:
+        from services.health_metrics import get_metrics
+        metrics = get_metrics()
+    except Exception as e:
+        return JSONResponse(
+            content={"error": f"Metrics collection failed: {e}"},
+            status_code=503,
+        )
+    return JSONResponse(content=metrics, status_code=200)
 
 
 @app.get("/api/health/diagnostic")

@@ -409,3 +409,86 @@ class TestIntegration:
         # Ring buffer caps at 100
         stats = m["endpoint_latency"]["GET /api/test"]
         assert stats["count"] == 100
+
+
+# ── /api/health/metrics endpoint integration ───────────────────────────
+
+class TestHealthMetricsEndpoint:
+    """
+    Test the GET /api/health/metrics endpoint that exposes collected metrics.
+    Uses the FastAPI TestClient from the conftest fixtures.
+    """
+
+    def test_endpoint_returns_200(self, test_client):
+        """The metrics endpoint should return HTTP 200."""
+        resp = test_client.get("/api/health/metrics")
+        assert resp.status_code == 200
+
+    def test_endpoint_returns_expected_keys(self, test_client):
+        """The response should contain all expected metric keys."""
+        # Seed some data first
+        from services import health_metrics as hm
+        hm.reset_metrics()
+        hm.record_request("GET", "/api/test", 200, 0.01)
+
+        resp = test_client.get("/api/health/metrics")
+        data = resp.json()
+        expected_keys = {
+            "uptime_seconds", "uptime_human", "request_count", "error_count",
+            "error_rate", "db_query_count", "db_error_count", "db_error_rate",
+            "endpoint_latency",
+        }
+        assert set(data.keys()) == expected_keys
+
+    def test_endpoint_reflects_recorded_requests(self, test_client):
+        """After recording requests, the endpoint should reflect them."""
+        from services import health_metrics as hm
+        hm.reset_metrics()
+        hm.record_request("GET", "/api/test", 200, 0.05)
+
+        resp = test_client.get("/api/health/metrics")
+        data = resp.json()
+        assert data["request_count"] == 1
+        assert data["error_count"] == 0
+        assert data["error_rate"] == 0.0
+
+    def test_endpoint_reflects_errors(self, test_client):
+        """After recording an error, the endpoint should show it."""
+        from services import health_metrics as hm
+        hm.reset_metrics()
+        hm.record_request("GET", "/api/test", 200, 0.01)
+        hm.record_request("GET", "/api/test", 500, 0.01)
+
+        resp = test_client.get("/api/health/metrics")
+        data = resp.json()
+        assert data["request_count"] == 2
+        assert data["error_count"] == 1
+        assert data["error_rate"] == 50.0
+
+    def test_endpoint_includes_latency_percentiles(self, test_client):
+        """With enough samples, p50/p95/p99 should be present."""
+        from services import health_metrics as hm
+        hm.reset_metrics()
+        for i in range(100):
+            hm.record_request("GET", "/api/test", 200, 0.001 * (i + 1))
+
+        resp = test_client.get("/api/health/metrics")
+        data = resp.json()
+        stats = data["endpoint_latency"]["GET /api/test"]
+        assert stats["count"] == 100
+        assert stats["p50_ms"] is not None
+        assert stats["p95_ms"] is not None
+        assert stats["p99_ms"] is not None
+        assert stats["avg_ms"] is not None
+
+    def test_endpoint_uptime_is_positive(self, test_client):
+        """Uptime should be a positive number."""
+        import time
+        from services import health_metrics as hm
+        hm.reset_metrics()
+        time.sleep(0.05)
+
+        resp = test_client.get("/api/health/metrics")
+        data = resp.json()
+        assert data["uptime_seconds"] >= 0.05
+        assert isinstance(data["uptime_human"], str)

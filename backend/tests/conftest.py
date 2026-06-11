@@ -9,7 +9,11 @@ Pattern: Every module-level dict/list/set that tests read or mutate should have
 a corresponding fixture that deep-copies it before the test and restores it after.
 """
 import copy
+import os
 import pytest
+
+# Set JWT_SECRET before any test imports main.py (module-level check)
+os.environ.setdefault("JWT_SECRET", "test-secret-for-unit-tests-only")
 
 
 @pytest.fixture(autouse=True)
@@ -63,3 +67,15 @@ def _restore_alert_cooldown_cache():
     ae._cooldown_cache.clear()
     ae._cooldown_cache.update(copy.deepcopy(original_cache))
     ae._last_cooldown_prune = original_prune_ts
+
+
+@pytest.fixture
+def test_client():
+    """
+    Provide a FastAPI TestClient for integration tests.
+    Uses a fresh app instance to avoid state pollution from the running server.
+    """
+    from fastapi.testclient import TestClient as _TestClient
+    from main import app
+    with _TestClient(app) as client:
+        yield client
