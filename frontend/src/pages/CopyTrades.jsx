@@ -232,6 +232,64 @@ function SignalStats({ token }) {
           <div style={{ fontSize: '18px', fontWeight: 700, color }}>{value}</div>
         </div>
       ))}
+
+      {/* ── Whale Tier Performance ── */}
+      {stats.performance_by_tier && Object.keys(stats.performance_by_tier).length > 0 && (
+        <>
+          <div style={{
+            gridColumn: '1 / -1',
+            marginTop: '8px',
+            marginBottom: '4px',
+            fontSize: '12px',
+            fontWeight: 600,
+            color: '#8b8f98',
+            textTransform: 'uppercase',
+            letterSpacing: '0.05em',
+          }}>
+            Performance by Whale Tier
+          </div>
+          {(['high', 'medium', 'low'] as const).map((tier) => {
+            const tierData = stats.performance_by_tier[tier];
+            if (!tierData) return null;
+            const tierExecPct = (tierData.execution_rate * 100).toFixed(1);
+            const tierConfPct = (tierData.avg_confidence * 100).toFixed(0);
+            const tierColor = tier === 'high' ? '#10b981' : tier === 'medium' ? '#f59e0b' : '#ef4444';
+            const tierLabel = tier === 'high' ? 'High Whale (≥0.7)' : tier === 'medium' ? 'Medium (0.4–0.7)' : 'Low (<0.4)';
+            return [
+              <div key={`${tier}-label`} style={{
+                background: '#13141a',
+                border: '1px solid rgba(255,255,255,0.06)',
+                borderRadius: '8px',
+                padding: '12px 14px',
+                borderLeft: `3px solid ${tierColor}`,
+              }}>
+                <div style={{ fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>{tierLabel}</div>
+                <div style={{ fontSize: '13px', color: '#d1d5db' }}>
+                  {tierData.total} signals · {tierData.executed} executed
+                </div>
+              </div>,
+              <div key={`${tier}-exec`} style={{
+                background: '#13141a',
+                border: '1px solid rgba(255,255,255,0.06)',
+                borderRadius: '8px',
+                padding: '12px 14px',
+              }}>
+                <div style={{ fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>Exec. Rate</div>
+                <div style={{ fontSize: '18px', fontWeight: 700, color: tierColor }}>{tierExecPct}%</div>
+              </div>,
+              <div key={`${tier}-conf`} style={{
+                background: '#13141a',
+                border: '1px solid rgba(255,255,255,0.06)',
+                borderRadius: '8px',
+                padding: '12px 14px',
+              }}>
+                <div style={{ fontSize: '11px', color: '#6b7280', marginBottom: '4px' }}>Avg Confidence</div>
+                <div style={{ fontSize: '18px', fontWeight: 700, color: '#f59e0b' }}>{tierConfPct}%</div>
+              </div>,
+            ];
+          })}
+        </>
+      )}
     </div>
   );
 }

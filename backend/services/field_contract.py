@@ -197,7 +197,7 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
         },
     ),
     # GET /api/signals/stats — returns aggregate signal performance statistics
-    # Shape matches backend/main.py get_signal_stats() response (lines ~1594-1615)
+    # Shape matches backend/main.py get_signal_stats() response
     # Frontend accesses: stats.total_signals, stats.execution_rate, stats.avg_confidence,
     #   stats.avg_whale_score, stats.by_status.pending, stats.by_status.executed,
     #   stats.recent_signals.last_7d
@@ -209,11 +209,13 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
             "total_signals", "by_status", "avg_confidence", "avg_whale_score",
             "avg_confidence_by_status", "avg_whale_score_executed",
             "execution_rate", "recent_signals", "avg_time_to_execute_seconds",
+            "performance_by_tier",
         },
         nested={
             "by_status": {"pending", "executed", "failed", "stale"},
             "avg_confidence_by_status": {"executed", "failed"},
             "recent_signals": {"last_24h", "last_7d"},
+            "tier_stats": {"total", "executed", "execution_rate", "avg_confidence", "avg_whale_score"},
         },
     ),
     # GET /api/signals/history — returns closed signal objects with outcome details

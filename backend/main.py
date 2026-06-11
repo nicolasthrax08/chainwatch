@@ -1694,9 +1694,46 @@ async def get_signal_stats(
             user["id"],
         )
 
+        # ── Performance by whale score tier ──
+        # Segments signals into high/medium/low whale score tiers
+        # so users can see which tier generates the most reliable signals.
+        tier_rows = await conn.fetch(
+            """
+            SELECT
+                CASE
+                    WHEN cts.score_at_generation >= 0.7 THEN 'high'
+                    WHEN cts.score_at_generation >= 0.4 THEN 'medium'
+                    ELSE 'low'
+                END AS tier,
+                COUNT(*) AS tier_total,
+                COUNT(*) FILTER (WHERE cts.status = 'executed') AS tier_executed,
+                ROUND(AVG(cts.confidence_score)::DECIMAL, 3) AS tier_avg_confidence,
+                ROUND(AVG(cts.score_at_generation)::DECIMAL, 3) AS tier_avg_whale_score
+            FROM copy_trade_signals cts
+            JOIN wallets w ON w.id = cts.wallet_id
+            WHERE w.user_id = $1
+            GROUP BY tier
+            ORDER BY tier
+            """,
+            user["id"],
+        )
+
     total = row["total_signals"] or 0
     executed = row["executed_count"] or 0
     execution_rate = round(executed / total, 3) if total > 0 else 0.0
+
+    # Build performance_by_tier dict
+    performance_by_tier = {}
+    for tr in tier_rows:
+        tier_total = tr["tier_total"] or 0
+        tier_executed = tr["tier_executed"] or 0
+        performance_by_tier[tr["tier"]] = {
+            "total": tier_total,
+            "executed": tier_executed,
+            "execution_rate": round(tier_executed / tier_total, 3) if tier_total > 0 else 0.0,
+            "avg_confidence": float(tr["tier_avg_confidence"] or 0),
+            "avg_whale_score": float(tr["tier_avg_whale_score"] or 0),
+        }
 
     return {
         "total_signals": total,
@@ -1719,6 +1756,7 @@ async def get_signal_stats(
             "last_7d": row["signals_7d"] or 0,
         },
         "avg_time_to_execute_seconds": float(row["avg_time_to_execute_seconds"] or 0),
+        "performance_by_tier": performance_by_tier,
     }
 
 
