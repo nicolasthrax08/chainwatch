@@ -137,7 +137,7 @@ class TestSendTgSafe(unittest.TestCase):
                 await alert_evaluator._send_tg_safe("chat-123", "test message")
                 mock_send.assert_called_once_with("test message", chat_id="chat-123")
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_send_tg_safe_calls_underlying(self):
         """_send_tg_safe should delegate to send_telegram_alert."""
@@ -146,7 +146,7 @@ class TestSendTgSafe(unittest.TestCase):
                 await alert_evaluator._send_tg_safe("chat-456", "hello")
                 mock_send.assert_called_once_with("hello", chat_id="chat-456")
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 class TestEvaluateAlertsEmptyInputs(unittest.TestCase):
@@ -161,7 +161,7 @@ class TestEvaluateAlertsEmptyInputs(unittest.TestCase):
             # No DB queries should be made
             conn.fetch.assert_not_called()
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_no_matching_alerts_returns_empty(self):
         """When DB returns no alerts, should return empty list."""
@@ -172,7 +172,7 @@ class TestEvaluateAlertsEmptyInputs(unittest.TestCase):
             result = await alert_evaluator.evaluate_alerts(conn, changed, {})
             self.assertEqual(result, [])
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 class TestEvaluateAlertsLargeTransaction(unittest.TestCase):
@@ -200,7 +200,7 @@ class TestEvaluateAlertsLargeTransaction(unittest.TestCase):
             self.assertEqual(result[0]["trigger_value"], 10000.0)
             self.assertIn("notify_telegram", result[0])
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_large_transaction_not_fires_when_below_threshold(self):
         """A tx below threshold should not fire."""
@@ -215,7 +215,7 @@ class TestEvaluateAlertsLargeTransaction(unittest.TestCase):
             result = await alert_evaluator.evaluate_alerts(conn, changed, {})
             self.assertEqual(len(result), 0)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_large_transaction_ignores_other_users_wallets(self):
         """Should not fire for wallets belonging to other users."""
@@ -231,7 +231,7 @@ class TestEvaluateAlertsLargeTransaction(unittest.TestCase):
             result = await alert_evaluator.evaluate_alerts(conn, changed, {})
             self.assertEqual(len(result), 0)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 class TestEvaluateAlertsWhaleBuy(unittest.TestCase):
@@ -255,7 +255,7 @@ class TestEvaluateAlertsWhaleBuy(unittest.TestCase):
             self.assertEqual(len(result), 1)
             self.assertEqual(result[0]["rule_type"], "whale_buy")
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_whale_buy_not_fires_for_non_whale(self):
         """A non-whale wallet should not trigger whale_buy."""
@@ -270,7 +270,7 @@ class TestEvaluateAlertsWhaleBuy(unittest.TestCase):
             result = await alert_evaluator.evaluate_alerts(conn, changed, {})
             self.assertEqual(len(result), 0)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_whale_buy_ignores_send_transactions(self):
         """A 'send' tx type should not trigger whale_buy (only buy/receive)."""
@@ -285,7 +285,7 @@ class TestEvaluateAlertsWhaleBuy(unittest.TestCase):
             result = await alert_evaluator.evaluate_alerts(conn, changed, {})
             self.assertEqual(len(result), 0)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 class TestEvaluateAlertsPortfolioChange(unittest.TestCase):
@@ -317,7 +317,7 @@ class TestEvaluateAlertsPortfolioChange(unittest.TestCase):
             self.assertEqual(len(result), 1)
             self.assertEqual(result[0]["rule_type"], "portfolio_change")
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_portfolio_change_not_fires_on_small_change(self):
         """A small portfolio change should not fire."""
@@ -337,7 +337,7 @@ class TestEvaluateAlertsPortfolioChange(unittest.TestCase):
             result = await alert_evaluator.evaluate_alerts(conn, changed, prev_map)
             self.assertEqual(len(result), 0)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_portfolio_change_filters_is_mine_and_not_whale(self):
         """Portfolio change should only consider personal (is_mine=True, is_whale=False) wallets."""
@@ -360,7 +360,7 @@ class TestEvaluateAlertsPortfolioChange(unittest.TestCase):
             # No change in personal wallets → no alert
             self.assertEqual(len(result), 0)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 class TestEvaluateAlertsBalanceDrop(unittest.TestCase):
@@ -390,7 +390,7 @@ class TestEvaluateAlertsBalanceDrop(unittest.TestCase):
             self.assertEqual(result[0]["rule_type"], "balance_drop")
             self.assertAlmostEqual(result[0]["trigger_value"], 20.0, places=1)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_balance_drop_not_fires_on_small_drop(self):
         """A small balance drop should not fire."""
@@ -410,7 +410,7 @@ class TestEvaluateAlertsBalanceDrop(unittest.TestCase):
             result = await alert_evaluator.evaluate_alerts(conn, changed, prev_map)
             self.assertEqual(len(result), 0)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_balance_drop_ignores_whale_wallets(self):
         """balance_drop should skip whale wallets."""
@@ -430,7 +430,7 @@ class TestEvaluateAlertsBalanceDrop(unittest.TestCase):
             result = await alert_evaluator.evaluate_alerts(conn, changed, prev_map)
             self.assertEqual(len(result), 0)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_balance_drop_ignores_non_mine_wallets(self):
         """balance_drop should skip wallets where is_mine=False."""
@@ -450,7 +450,7 @@ class TestEvaluateAlertsBalanceDrop(unittest.TestCase):
             result = await alert_evaluator.evaluate_alerts(conn, changed, prev_map)
             self.assertEqual(len(result), 0)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 class TestEvaluateAlertsCooldown(unittest.TestCase):
@@ -474,7 +474,7 @@ class TestEvaluateAlertsCooldown(unittest.TestCase):
             result = await alert_evaluator.evaluate_alerts(conn, changed, {})
             self.assertEqual(len(result), 0)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_in_memory_cooldown_prevents_fire(self):
         """An alert in in-memory cooldown should be skipped."""
@@ -491,7 +491,7 @@ class TestEvaluateAlertsCooldown(unittest.TestCase):
             result = await alert_evaluator.evaluate_alerts(conn, changed, {})
             self.assertEqual(len(result), 0)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 class TestEvaluateAlertsUnknownRuleType(unittest.TestCase):
@@ -514,7 +514,7 @@ class TestEvaluateAlertsUnknownRuleType(unittest.TestCase):
             result = await alert_evaluator.evaluate_alerts(conn, changed, {})
             self.assertEqual(len(result), 0)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 class TestEvaluateAlertsNotifyTelegram(unittest.TestCase):
@@ -538,7 +538,7 @@ class TestEvaluateAlertsNotifyTelegram(unittest.TestCase):
             self.assertEqual(len(result), 1)
             self.assertFalse(result[0]["notify_telegram"])
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 class TestEvaluateAlertsResponseShape(unittest.TestCase):
@@ -563,7 +563,7 @@ class TestEvaluateAlertsResponseShape(unittest.TestCase):
             expected_keys = {"alert_id", "user_id", "rule_type", "threshold", "trigger_value", "message", "notify_telegram"}
             self.assertEqual(set(result[0].keys()), expected_keys)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 if __name__ == "__main__":

@@ -1763,7 +1763,7 @@ async def get_signal_stats(
 @app.get("/api/signals/history")
 async def get_signal_history(
     limit: int = Query(20, ge=1, le=100),
-    status_filter: str = Query(None, regex="^(executed|failed|stale)$"),
+    status_filter: str = Query(None, pattern="^(executed|failed|stale)$"),
     user: dict = Depends(get_current_user),
 ):
     """

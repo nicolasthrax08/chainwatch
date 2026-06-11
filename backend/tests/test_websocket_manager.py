@@ -42,7 +42,7 @@ class TestWebSocketManagerConnect(unittest.TestCase):
             self.assertIn("user-1", self.manager._connections)
             self.assertIn(ws, self.manager._connections["user-1"])
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_connect_multiple_users(self):
         """Different users should have separate connection sets."""
@@ -55,7 +55,7 @@ class TestWebSocketManagerConnect(unittest.TestCase):
             self.assertIn(ws2, self.manager._connections["user-2"])
             self.assertNotIn(ws1, self.manager._connections["user-2"])
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_connect_multiple_same_user(self):
         """Same user can have multiple connections."""
@@ -66,7 +66,7 @@ class TestWebSocketManagerConnect(unittest.TestCase):
             await self.manager.connect(ws2, "user-1")
             self.assertEqual(len(self.manager._connections["user-1"]), 2)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_connection_cap_rejects_excess(self):
         """Exceeding MAX_CONNECTIONS_PER_USER should reject with code 4008."""
@@ -81,7 +81,7 @@ class TestWebSocketManagerConnect(unittest.TestCase):
             ws_reject.close.assert_called_once_with(code=4008, reason="Too many connections")
             ws_reject.accept.assert_not_called()
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_connection_cap_constant(self):
         """MAX_CONNECTIONS_PER_USER should be 5."""
@@ -105,7 +105,7 @@ class TestWebSocketManagerDisconnect(unittest.TestCase):
             self.assertNotIn(ws1, self.manager._connections["user-1"])
             self.assertIn(ws2, self.manager._connections["user-1"])
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_disconnect_last_removes_user_entry(self):
         """Disconnecting the last WS for a user should remove the user entry."""
@@ -115,7 +115,7 @@ class TestWebSocketManagerDisconnect(unittest.TestCase):
             await self.manager.disconnect(ws, "user-1")
             self.assertNotIn("user-1", self.manager._connections)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_disconnect_unknown_user_is_noop(self):
         """Disconnecting a user with no connections should not error."""
@@ -124,7 +124,7 @@ class TestWebSocketManagerDisconnect(unittest.TestCase):
             await self.manager.disconnect(ws, "nonexistent-user")
             # Should not raise
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_disconnect_unknown_ws_is_noop(self):
         """Disconnecting a WS that was never registered should not error."""
@@ -135,7 +135,7 @@ class TestWebSocketManagerDisconnect(unittest.TestCase):
             await self.manager.disconnect(ws2, "user-1")  # ws2 was never added
             self.assertIn(ws1, self.manager._connections["user-1"])
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 class TestWebSocketManagerSendToUser(unittest.TestCase):
@@ -157,7 +157,7 @@ class TestWebSocketManagerSendToUser(unittest.TestCase):
             ws1.send_json.assert_called_once_with(event)
             ws2.send_json.assert_called_once_with(event)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_send_to_user_returns_zero_for_unknown(self):
         """send_to_user for unknown user should return 0."""
@@ -165,7 +165,7 @@ class TestWebSocketManagerSendToUser(unittest.TestCase):
             count = await self.manager.send_to_user("nonexistent", {"type": "test"})
             self.assertEqual(count, 0)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_send_cleans_up_dead_connections(self):
         """Dead connections should be cleaned up after send failure."""
@@ -181,7 +181,7 @@ class TestWebSocketManagerSendToUser(unittest.TestCase):
             # Dead connection should be removed
             self.assertNotIn(ws_dead, self.manager._connections.get("user-1", set()))
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 class TestWebSocketManagerBroadcast(unittest.TestCase):
@@ -203,7 +203,7 @@ class TestWebSocketManagerBroadcast(unittest.TestCase):
             ws1.send_json.assert_called_once_with(event)
             ws2.send_json.assert_called_once_with(event)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_broadcast_empty_returns_zero(self):
         """broadcast with no connections should return 0."""
@@ -211,7 +211,7 @@ class TestWebSocketManagerBroadcast(unittest.TestCase):
             count = await self.manager.broadcast({"type": "test"})
             self.assertEqual(count, 0)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 class TestWebSocketManagerCloseAll(unittest.TestCase):
@@ -232,7 +232,7 @@ class TestWebSocketManagerCloseAll(unittest.TestCase):
             ws2.close.assert_called_once_with(code=1001, reason="Shutting down")
             self.assertEqual(len(self.manager._connections), 0)
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_close_all_empty_is_noop(self):
         """close_all with no connections should not error."""
@@ -240,7 +240,7 @@ class TestWebSocketManagerCloseAll(unittest.TestCase):
             await self.manager.close_all()
             # Should not raise
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
     def test_close_all_swallows_errors(self):
         """close_all should not raise even if individual closes fail."""
@@ -252,7 +252,7 @@ class TestWebSocketManagerCloseAll(unittest.TestCase):
             # Should not raise
             await self.manager.close_all()
 
-        asyncio.get_event_loop().run_until_complete(run())
+        asyncio.run(run())
 
 
 class TestWebSocketManagerSingleton(unittest.TestCase):
