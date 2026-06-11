@@ -13,8 +13,6 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "services"))
 
-# Import fresh for each test class via fixture
-import importlib
 import health_metrics as hm
 
 
