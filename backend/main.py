@@ -96,16 +96,30 @@ _APPROX_PRICE_USD = {"btc": 105000.0, "eth": 2500.0, "sol": 170.0}
 _MIRROR_RATE_LIMIT = 10          # max requests per window
 _MIRROR_RATE_WINDOW = 60.0       # window in seconds
 _MIRROR_RATE_BURST = 5           # max burst above rate
+_MIRROR_RATE_MAX_AGE = 3600.0    # prune entries idle longer than 1 hour
 _mirror_rate_buckets: dict = {}  # user_id -> (tokens, last_refill_ts)
+
+
+def _prune_mirror_rate_buckets(now: float) -> None:
+    """Remove rate-limit entries idle longer than _MIRROR_RATE_MAX_AGE (Pitfall #12)."""
+    stale = [
+        uid for uid, (_, last_refill) in _mirror_rate_buckets.items()
+        if (now - last_refill) > _MIRROR_RATE_MAX_AGE
+    ]
+    for uid in stale:
+        del _mirror_rate_buckets[uid]
 
 
 def _check_mirror_rate_limit(user_id: str) -> bool:
     """
     Token-bucket rate limiter for mirror trade endpoint.
     Returns True if the request is allowed, False if rate-limited.
+    Prunes stale entries on read to prevent unbounded memory growth (Pitfall #12).
     """
     import time as _time
     now = _time.monotonic()
+    # Prune entries idle longer than _MIRROR_RATE_MAX_AGE
+    _prune_mirror_rate_buckets(now)
     if user_id not in _mirror_rate_buckets:
         _mirror_rate_buckets[user_id] = (
             float(_MIRROR_RATE_BURST),
@@ -132,6 +146,7 @@ _dashboard_price_cache: dict = {
     "USDBTC": 1.0 / 105000.0,
     "timestamp": 0.0,
 }
+_dashboard_price_lock = asyncio.Lock()
 
 
 async def _fetch_dashboard_prices() -> dict:
@@ -139,37 +154,46 @@ async def _fetch_dashboard_prices() -> dict:
     Fetch USD/HKD and USD/BTC cross-rates from CoinGecko.
     Returns a dict with USDHKD and USDBTC keys.
     Cached for 120 s to avoid rate limits.
+    Uses asyncio.Lock to prevent concurrent CoinGecko calls (Pitfall #12 M2).
     """
     import time
     now = time.time()
     cache = _dashboard_price_cache
+
+    # Fast path: no lock needed for a fresh read
     if cache["timestamp"] > 0 and now - cache["timestamp"] < 120:
         return cache
 
-    try:
-        from services.tx_fetcher import _get_client
-        client = await _get_client()
-        resp = await client.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": "ethereum", "vs_currencies": "usd,hkd,btc"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    # Slow path: acquire lock to avoid duplicate HTTP calls
+    async with _dashboard_price_lock:
+        # Re-check after acquiring lock — another coroutine may have refreshed
+        if cache["timestamp"] > 0 and time.time() - cache["timestamp"] < 120:
+            return cache
 
-        eth = data.get("ethereum", {})
-        eth_usd = eth.get("usd", 0)
-        eth_hkd = eth.get("hkd", 0)
-        eth_btc = eth.get("btc", 0)
+        try:
+            from services.tx_fetcher import _get_client
+            client = await _get_client()
+            resp = await client.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": "ethereum", "vs_currencies": "usd,hkd,btc"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
 
-        if eth_usd > 0 and eth_hkd > 0:
-            cache["USDHKD"] = eth_hkd / eth_usd
-        if eth_usd > 0 and eth_btc > 0:
-            cache["USDBTC"] = eth_btc / eth_usd
-        cache["timestamp"] = now
-    except Exception:
-        pass  # Keep stale cached values on failure
+            eth = data.get("ethereum", {})
+            eth_usd = eth.get("usd", 0)
+            eth_hkd = eth.get("hkd", 0)
+            eth_btc = eth.get("btc", 0)
 
-    return cache
+            if eth_usd > 0 and eth_hkd > 0:
+                cache["USDHKD"] = eth_hkd / eth_usd
+            if eth_usd > 0 and eth_btc > 0:
+                cache["USDBTC"] = eth_btc / eth_usd
+            cache["timestamp"] = time.time()
+        except Exception:
+            pass  # Keep stale cached values on failure
+
+        return cache
 
 
 app = FastAPI(
