@@ -3729,6 +3729,39 @@ def check_signal_history_endpoint(py_files: List[str], result: AuditResult):
             suggestion="Add ORDER BY closed_at DESC to show most recently closed signals first.",
         ))
 
+    # Cycle 2026-06-12: Check that history endpoint restricts to terminal statuses
+    found_status_in = False
+    for fpath in py_files:
+        src = read_file(fpath)
+        if not src:
+            continue
+        if "@app.get(\"/api/signals/history\")" in src or '@app.get(\"/api/signals/history\")' in src:
+            # Search for status IN filter near the history endpoint context
+            if "status IN ('executed', 'failed', 'stale')" in src:
+                found_status_in = True
+                break
+
+    if found_status_in:
+        result.passed.append(
+            "Signal history endpoint: filters by status IN ('executed', 'failed', 'stale') "
+            "(only terminal states)"
+        )
+    else:
+        result.findings.append(Finding(
+            pitfall="signal-history-missing-status-filter",
+            severity="minor",
+            file="main.py",
+            line=0,
+            description=(
+                "Signal history endpoint does not filter by status IN ('executed', 'failed', 'stale'). "
+                "Signals with non-terminal statuses that have closed_at set could leak into history."
+            ),
+            suggestion=(
+                "Add \"'cts.status IN (''executed'', ''failed'', ''stale'')'\" "
+                "to the mandatory WHERE conditions."
+            ),
+        ))
+
 
 def check_duplicate_cycle_stats(py_files: List[str], result: AuditResult):
     """

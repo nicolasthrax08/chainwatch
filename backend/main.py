@@ -1776,7 +1776,11 @@ async def get_signal_history(
         - limit: max results (1-100, default 20)
         - status_filter: optional filter by status (executed|failed|stale)
     """
-    conditions = ["w.user_id = $1", "cts.closed_at IS NOT NULL"]
+    conditions = [
+        "w.user_id = $1",
+        "cts.closed_at IS NOT NULL",
+        "cts.status IN ('executed', 'failed', 'stale')",
+    ]
     params: list = [user["id"]]
     param_idx = 2
 
@@ -2710,19 +2714,6 @@ async def health_startup_log():
         "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
         "entries": _get_startup_log_entries(),
     })
-
-
-# ─── Application Metrics ─────────────────────────────────────────────
-
-@app.get("/api/health/metrics")
-async def health_metrics():
-    """
-    Application-level metrics: request counts, error rates, DB query stats,
-    and per-endency latency percentiles. Useful for dashboards and alerting.
-    Resets on restart (in-memory only — no persistent time-series).
-    """
-    from services.health_metrics import get_metrics
-    return JSONResponse(content=get_metrics())
 
 
 # ─── Whale Scorer Diagnostic ─────────────────────────────────────────

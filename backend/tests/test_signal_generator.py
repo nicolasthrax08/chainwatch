@@ -380,16 +380,16 @@ class TestEvaluateForSignalWhaleScore(DedupCacheTestBase):
         return conn
 
     def test_whale_score_below_min(self):
-        """whale_score=0.19 < MIN_WHALE_SCORE=0.20 should return None."""
+        """whale_score=0.29 < MIN_WHALE_SCORE=0.30 should return None."""
         conn = self._make_conn()
         result = _run(sg.evaluate_for_signal(
             conn, "wid", True, "user1", "eth", "0xhash", "buy",
-            "ETH", 10.0, 5000.0, whale_score=0.19,
+            "ETH", 10.0, 5000.0, whale_score=0.29,
         ))
         self.assertIsNone(result)
 
     def test_whale_score_at_min(self):
-        """whale_score=0.20 == MIN_WHALE_SCORE should pass gate."""
+        """whale_score=0.30 == MIN_WHALE_SCORE should pass gate."""
         conn = self._make_conn()
         conn.fetchval = AsyncMock(return_value=None)
         conn.fetchrow = AsyncMock(return_value={
@@ -399,7 +399,7 @@ class TestEvaluateForSignalWhaleScore(DedupCacheTestBase):
         })
         result = _run(sg.evaluate_for_signal(
             conn, "wid", True, "user1", "eth", "0xhash", "buy",
-            "ETH", 10.0, 5000.0, whale_score=0.20,
+            "ETH", 10.0, 5000.0, whale_score=0.30,
         ))
         self.assertIsNotNone(result)
 
@@ -1018,7 +1018,7 @@ class TestConstants(unittest.TestCase):
         self.assertEqual(sg.MIN_SIGNAL_USD_DEFAULT, 5000.0)
 
     def test_min_whale_score(self):
-        self.assertEqual(sg.MIN_WHALE_SCORE, 0.20)
+        self.assertEqual(sg.MIN_WHALE_SCORE, 0.30)
 
     def test_dedup_ttl(self):
         self.assertEqual(sg._DEDUP_TTL_SECONDS, 300)

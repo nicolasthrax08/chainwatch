@@ -24,10 +24,11 @@ DEDUP_INTERVAL = "5 minutes"
 # Minimum whale score threshold (0.0-1.0) for signal generation.
 # Wallets with whale_score below this value will not generate signals,
 # even if the transaction amount exceeds MIN_SIGNAL_USD_BY_CHAIN.
-# Default: 0.20 (20%), lenient enough to include new/cold-start whales
-# but strict enough to filter out wallets that were marked whale by
-# balance alone with zero signal history.
-MIN_WHALE_SCORE = 0.20
+# Default: 0.30 (30%), filters out the weakest whale wallets while
+# still capturing mid-tier whales. Raised from 0.20 in cycle
+# 2026-06-12 after threshold review found 0.20 too lenient —
+# at 0.20, C_final is capped at 0.60 for borderline whales.
+MIN_WHALE_SCORE = 0.30
 
 # Finding 5: In-memory dedup cache with TTL to prevent signal dedup race condition
 # Maps (wallet_id, token_symbol, action) → insertion_timestamp
