@@ -52,7 +52,7 @@ function fmtBalance(wallet, currency) {
   else if (currency === 'BTC') value = wallet.balance_btc;
   else value = wallet.balance_usd;
 
-  if (value == null) return '—';  // Finding: !value treated real 0 as no-data
+  if (value == null) return '—';  // null/undefined → no data; 0 is a valid balance
 
   if (currency === 'BTC') return `₿${value.toFixed(8)}`;
   if (currency === 'HKD') return `HK$${value.toLocaleString()}`;
