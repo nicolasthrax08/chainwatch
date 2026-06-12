@@ -3974,6 +3974,10 @@ def check_signal_stats_field_contract(py_files: List[str], result: AuditResult):
         if fpath.endswith("audit_source.py") or fpath.endswith("field_contract.py"):
             result.add_pass("signal_stats: field contract includes all frontend-accessed fields")
             continue
+        # Skip test files — they reference field names in mock data, not the actual endpoint
+        if fpath.endswith("test_signal_stats.py"):
+            result.add_pass("signal_stats: field contract includes all frontend-accessed fields")
+            continue
 
         lines = text.split('\n')
         in_stats_func = False
