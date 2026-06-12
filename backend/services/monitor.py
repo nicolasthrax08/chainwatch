@@ -69,6 +69,11 @@ _price_cache: Dict[str, float] = {
     "timestamp": 0.0,
 }
 
+# Event used by _ensure_prices_fetched to make concurrent callers wait for
+# the in-flight HTTP fetch instead of proceeding with stale data.
+# When set, the fetch is complete and _price_cache has been updated.
+_price_fetch_event: Optional[asyncio.Event] = None
+
 # Stablecoin set — defined once at module level (not inside the poll loop)
 # to avoid re-allocating the set on every changed wallet iteration.
 _STABLECOINS: Set[str] = {
@@ -807,9 +812,9 @@ async def _ensure_prices_fetched() -> None:
     rate-limited (Pitfall #12/M1: lock held across external HTTP calls).
 
     Concurrency safety:
-    - A module-level _price_fetch_in_progress flag prevents thundering herd
-      (multiple concurrent coroutines all deciding to fetch simultaneously).
+    - An asyncio.Event (_price_fetch_event) coordinates concurrent callers.
     - Only one coroutine performs the HTTP fetch; others await its result.
+    - If the fetch fails, waiters still unblock and proceed with stale data.
     """
     import time as _time_mod
 
@@ -819,13 +824,26 @@ async def _ensure_prices_fetched() -> None:
         cache_age = now - _price_cache.get("timestamp", 0)
         if _price_cache.get("timestamp", 0) > 0 and cache_age < 60:
             return  # Cache still valid
-        # If another coroutine is already fetching, skip — it will update the cache
-        if _price_cache.get("_fetch_in_progress", False):
-            return
-        # Mark fetch in progress so other coroutines don't also fetch
-        _price_cache["_fetch_in_progress"] = True
+        # If another coroutine is already fetching, await its result
+        global _price_fetch_event
+        if _price_fetch_event is not None and not _price_fetch_event.is_set():
+            event_to_wait = _price_fetch_event
+            # Release lock before awaiting
+            pass
+        else:
+            # We are the fetcher — create the event so others can await it
+            _price_fetch_event = asyncio.Event()
+            event_to_wait = None
 
-    # ── Phase B: Fetch from CoinGecko (NO lock held) ─────────────────
+    # ── Phase A2: If a fetch is in flight, await it instead of proceeding ──
+    if event_to_wait is not None:
+        try:
+            await asyncio.wait_for(event_to_wait.wait(), timeout=15)
+        except asyncio.TimeoutError:
+            logger.warning("Timeout waiting for in-flight price fetch, using stale prices")
+        return
+
+    # ── Phase B: We are the fetcher — Fetch from CoinGecko (NO lock held) ─
     new_prices = {}
     try:
         from services.tx_fetcher import _get_client as _get_shared_client
@@ -872,23 +890,29 @@ async def _ensure_prices_fetched() -> None:
 
     except asyncio.CancelledError:
         # CRITICAL: Coroutine was cancelled (e.g., during shutdown).
-        # Must clear _fetch_in_progress so future cycles can retry.
+        # Must clear _price_fetch_event so future cycles can retry.
         async with _price_cache_lock:
-            _price_cache["_fetch_in_progress"] = False
+            _price_fetch_event.set()  # Unblock any waiters
+            _price_fetch_event = None
         raise  # Re-raise to propagate cancellation
 
     except Exception as e:
         logger.warning(f"Price refresh failed (using stale): {e}")
-        # Clear the in-progress flag so a retry can happen next cycle
+        # Signal waiters that the fetch is done (even though it failed)
+        # and reset the event so the next cycle can retry
         async with _price_cache_lock:
-            _price_cache["_fetch_in_progress"] = False
+            if _price_fetch_event is not None:
+                _price_fetch_event.set()
+                _price_fetch_event = None
         return
 
     # ── Phase C: Update cache under lock (fast, no I/O) ──────────────
     async with _price_cache_lock:
         _price_cache.update(new_prices)
         _price_cache["timestamp"] = _time_mod.time()
-        _price_cache["_fetch_in_progress"] = False
+        if _price_fetch_event is not None:
+            _price_fetch_event.set()
+            _price_fetch_event = None
 
     if new_prices.get("ETH", 0) > 0:
         logger.info(
