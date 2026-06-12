@@ -442,14 +442,24 @@ class TestSignalStatsEndpoint(unittest.TestCase):
     """
 
     def setUp(self):
+        import sys
+        # Re-import main to get a fresh module reference that matches
+        # whatever sys.modules["main"] points to (important when
+        # test_main_endpoints.py deletes and re-imports main).
+        if "main" in sys.modules:
+            del sys.modules["main"]
+        import main as main_mod
+        self._main_mod = main_mod
+
         from fastapi.testclient import TestClient
-        self.client = TestClient(app)
+        self.client = TestClient(main_mod.app)
         self.user_id = "test-user-uuid-12345"
         self.wallet = "0xTESTWALLET1234567890"
-        self.token = create_jwt(self.wallet, self.user_id)
+        self.token = main_mod.create_jwt(self.wallet, self.user_id)
 
     def _mock_db_pool(self, overall_row, tier_rows):
         """Replace main.db_pool with a mock that returns the given data."""
+        main_mod = self._main_mod
         mock_conn = AsyncMock()
         mock_conn.fetchrow = AsyncMock(return_value=overall_row)
         mock_conn.fetch = AsyncMock(return_value=tier_rows)
@@ -457,19 +467,27 @@ class TestSignalStatsEndpoint(unittest.TestCase):
         mock_pool = MagicMock()
         mock_pool.acquire = lambda: _AsyncCtxMgr(mock_conn)
 
-        patcher = patch.dict(
-            os.environ, {"JWT_SECRET": "test-secret-for-signal-stats"}
+        # Also mock require_db so it doesn't short-circuit to 503
+        self._require_db_patcher = patch(
+            "main.require_db", return_value=None
         )
-        patcher.start()
-        # Directly patch main.db_pool
+        self._require_db_patcher.start()
+
+        # Directly set main.db_pool on the already-imported module
         self._pool_patcher = patch("main.db_pool", mock_pool)
         self._pool_patcher.start()
 
     def tearDown(self):
-        # Stop all patchers
-        for attr in dir(self):
+        # Stop all patchers and reset db_pool to None so subsequent
+        # test classes don't inherit a stale mock pool.
+        for attr in sorted(dir(self)):
             if attr.endswith("_patcher"):
-                getattr(self, attr).stop()
+                try:
+                    getattr(self, attr).stop()
+                except RuntimeError:
+                    pass  # already stopped
+        # Reset db_pool to None to prevent cross-test contamination
+        self._main_mod.db_pool = None
 
     def test_endpoint_returns_200_with_signals(self):
         """Endpoint should return 200 with valid signal data."""
@@ -543,7 +561,7 @@ class TestTierStatsSchema(unittest.TestCase):
             "total": tier_total,
             "executed": tier_executed,
             "execution_rate": round(tier_executed / tier_total, 3) if tier_total > 0 else 0.0,
-            "avg_confidity": float(tier_avg_confidence or 0),
+            "avg_confidence": float(tier_avg_confidence or 0),
             "avg_whale_score": float(tier_avg_whale_score or 0),
         }
         return result

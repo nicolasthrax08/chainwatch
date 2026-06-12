@@ -441,8 +441,10 @@ def _verify_wallet_signature(wallet_address: str, signature: str, message: str, 
 
 
 async def get_current_user(
-    authorization: str = Header(...),
+    authorization: Optional[str] = Header(None),
 ) -> dict:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header required")
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid auth header")
     token = authorization[7:]

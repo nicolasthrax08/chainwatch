@@ -53,6 +53,25 @@ def _restore_signal_dedup_cache():
 
 
 @pytest.fixture(autouse=True)
+def _restore_main_db_pool():
+    """
+    Auto-restore main.db_pool to None after every test.
+
+    Tests that patch main.db_pool (e.g. test_signal_stats.py TestSignalStatsEndpoint)
+    can leave a stale mock on the module-level variable. Without this fixture,
+    subsequent tests that check `if db_pool is None` (like the acquire_db() 503 path)
+    would see a stale mock instead of None, or vice versa.
+
+    This fixture snapshots db_pool before each test and restores it after,
+    preventing cross-test contamination of the DB pool state.
+    """
+    import main as main_mod
+    original_pool = main_mod.db_pool
+    yield
+    main_mod.db_pool = original_pool
+
+
+@pytest.fixture(autouse=True)
 def _restore_alert_cooldown_cache():
     """
     Auto-restore the alert cooldown cache in alert_evaluator after every test.

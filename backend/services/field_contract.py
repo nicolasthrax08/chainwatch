@@ -215,7 +215,7 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
             "by_status": {"pending", "executed", "failed", "stale"},
             "avg_confidence_by_status": {"executed", "failed"},
             "recent_signals": {"last_24h", "last_7d"},
-            "tier_stats": {"total", "executed", "execution_rate", "avg_confidence", "avg_whale_score"},
+            "performance_by_tier": {"total", "executed", "execution_rate", "avg_confidence", "avg_whale_score"},
         },
     ),
     # GET /api/signals/history — returns closed signal objects with outcome details
@@ -299,6 +299,9 @@ OBJECT_NAME_MAP: Dict[str, List[str]] = {
     "transaction": ["transaction"],
     "t": ["transaction"],
     "suggestion": ["suggestion"],
+    # "stats" is the response from /api/signals/stats — a flat object whose
+    # fields are checked against the signal_stats endpoint's top-level fields.
+    "stats": ["_top_level"],
     # "sentiment" is returned by /api/whale-sentiment as a flat object
     # (not wrapped in a list key), so top-level fields are checked directly.
     # We use the special key "_top_level" to indicate the endpoint's own
