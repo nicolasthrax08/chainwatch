@@ -296,7 +296,7 @@ class TestAuthEndpoints:
     def test_me_accepts_valid_jwt(self, client):
         c, _, _, _ = client
         # Include uid in JWT to avoid DB lookup fallback (Pitfall #21 optimization)
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
@@ -319,7 +319,7 @@ class TestDashboardEndpoint:
 
     def test_dashboard_returns_structure(self, client):
         c, _, _, _ = client
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
@@ -331,7 +331,7 @@ class TestDashboardEndpoint:
 
     def test_dashboard_portfolio_structure(self, client):
         c, _, _, _ = client
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
@@ -356,7 +356,7 @@ class TestWalletEndpoints:
 
     def test_list_wallets_returns_empty_list(self, client):
         c, _, _, _ = client
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
@@ -387,7 +387,7 @@ class TestSignalsEndpoints:
 
     def test_list_signals_returns_structure(self, client):
         c, _, _, _ = client
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
@@ -403,7 +403,7 @@ class TestSignalsEndpoints:
 
     def test_signal_stats_returns_structure(self, client):
         c, _, _, _ = client
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
@@ -419,7 +419,7 @@ class TestSignalsEndpoints:
 
     def test_signal_history_returns_structure(self, client):
         c, _, _, _ = client
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
@@ -442,7 +442,7 @@ class TestAlertsEndpoints:
 
     def test_list_alerts_returns_structure(self, client):
         c, _, _, _ = client
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
@@ -461,7 +461,7 @@ class TestAlertsEndpoints:
 
     def test_create_alert_validates_rule_type(self, client):
         c, _, _, _ = client
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
@@ -475,7 +475,7 @@ class TestAlertsEndpoints:
 
     def test_create_alert_validates_threshold_range(self, client):
         c, _, _, _ = client
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
@@ -495,7 +495,7 @@ class TestAlertsEndpoints:
 
     def test_alert_history_returns_structure(self, client):
         c, _, _, _ = client
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
@@ -518,7 +518,7 @@ class TestActivityEndpoint:
 
     def test_activity_returns_pagination(self, client):
         c, _, _, _ = client
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
@@ -529,7 +529,7 @@ class TestActivityEndpoint:
 
     def test_activity_chain_filter(self, client):
         c, _, _, _ = client
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
@@ -540,7 +540,7 @@ class TestActivityEndpoint:
 
     def test_activity_type_filter(self, client):
         c, _, _, _ = client
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
@@ -563,7 +563,7 @@ class TestWhaleSuggestionsEndpoint:
 
     def test_whale_suggestions_returns_structure(self, client):
         c, _, _, _ = client
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
@@ -574,7 +574,7 @@ class TestWhaleSuggestionsEndpoint:
 
     def test_whale_suggestions_chain_filter(self, client):
         c, _, _, _ = client
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
@@ -597,7 +597,7 @@ class TestWhaleSentimentEndpoint:
 
     def test_whale_sentiment_returns_neutral_when_no_data(self, client):
         c, _, _, _ = client
-        from jose import jwt as jose_jwt
+        import jwt as jose_jwt
         token = jose_jwt.encode(
             {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
             "test-secret-for-integration-tests",
