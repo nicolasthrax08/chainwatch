@@ -508,9 +508,9 @@ def check_start_monitor_wired(py_files: List[str], result: AuditResult):
     Uses regex-based detection (AST parsing fails on files with module-level await).
     """
     # Pattern: match @app.on_event("startup") or @app.on_event('startup')
-    # followed by start_monitor within the same function body
+    # OR @asynccontextmanager + lifespan pattern — followed by start_monitor within the same function body
     startup_decorator = re.compile(
-        r"@app\.on_event\s*\(\s*[\"']startup[\"']\s*\)",
+        r"(@app\.on_event\s*\(\s*[\"']startup[\"']\s*\))|(@asynccontextmanager)",
     )
     shutdown_decorator = re.compile(
         r"@app\.on_event\s*\(\s*[\"']shutdown[\"']\s*\)",

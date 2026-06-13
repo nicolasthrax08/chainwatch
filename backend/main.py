@@ -11,6 +11,7 @@ import asyncio
 import httpx
 import secrets
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Any
 from decimal import Decimal
@@ -196,40 +197,9 @@ async def _fetch_dashboard_prices() -> dict:
         return cache
 
 
-app = FastAPI(
-    title="ChainWatch",
-    description="Crypto Portfolio Tracker",
-    version="1.0.0"
-)
-
-# CORS: restrict to known production domains.
-# Set CORS_ORIGINS env var to a comma-separated list of allowed origins.
-# Falls back to the production Zeabur domain if not set.
-_CORS_ORIGINS_RAW = os.environ.get(
-    "CORS_ORIGINS",
-    "https://chainwatch-eness.zeabur.app",
-)
-_CORS_ORIGINS = [o.strip() for o in _CORS_ORIGINS_RAW.split(",") if o.strip()]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Database pool
-db_pool: Optional[asyncpg.Pool] = None
-
-# ─── Metrics Middleware ───────────────────────────────────────────────
-# Must be added early so it captures all downstream endpoints.
-from services.metrics_middleware import MetricsMiddleware  # noqa: E402
-app.add_middleware(MetricsMiddleware)
-
-
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI lifespan context manager — replaces deprecated on_event handlers."""
     global db_pool
 
     # ── Fail-fast: validate CHAINWATCH_MASTER_KEY for per-user Alpaca encryption ──
@@ -321,16 +291,14 @@ async def startup():
         start_monitor(db_pool)
         _log_startup_event("monitor_started", f"poll_interval=60s")
 
+    # ── Yield control to FastAPI (application is now serving requests) ──
+    yield
 
-@app.on_event("shutdown")
-async def shutdown():
-    # F8: await the async close which sends the signal AND drains in-flight queries
-    if db_pool:
-        await db_pool.close()
-    # Close the shared HTTP client from tx_fetcher
+    # ── Shutdown: clean up resources in reverse order ──
+    # Gracefully close all WebSocket connections
     try:
-        from services.tx_fetcher import close_client
-        await close_client()
+        from services.websocket_manager import websocket_manager
+        await websocket_manager.close_all(code=1001, reason="Server shutting down")
     except Exception:
         pass
     # Close the monitor worker
@@ -339,12 +307,48 @@ async def shutdown():
         await stop_monitor()
     except Exception:
         pass
-    # Gracefully close all WebSocket connections
+    # Close the shared HTTP client from tx_fetcher
     try:
-        from services.websocket_manager import websocket_manager
-        await websocket_manager.close_all(code=1001, reason="Server shutting down")
+        from services.tx_fetcher import close_client
+        await close_client()
     except Exception:
         pass
+    # Close the DB pool (await the async close which sends the signal AND drains in-flight queries)
+    if db_pool:
+        await db_pool.close()
+
+
+app = FastAPI(
+    title="ChainWatch",
+    description="Crypto Portfolio Tracker",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# CORS: restrict to known production domains.
+# Set CORS_ORIGINS env var to a comma-separated list of allowed origins.
+# Falls back to the production Zeabur domain if not set.
+_CORS_ORIGINS_RAW = os.environ.get(
+    "CORS_ORIGINS",
+    "https://chainwatch-eness.zeabur.app",
+)
+_CORS_ORIGINS = [o.strip() for o in _CORS_ORIGINS_RAW.split(",") if o.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Database pool
+db_pool: Optional[asyncpg.Pool] = None
+
+# ─── Metrics Middleware ───────────────────────────────────────────────
+# Must be added early so it captures all downstream endpoints.
+from services.metrics_middleware import MetricsMiddleware  # noqa: E402
+app.add_middleware(MetricsMiddleware)
 
 
 # ─── Helpers ────────────────────────────────────────────────────────

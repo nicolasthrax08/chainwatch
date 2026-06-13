@@ -307,6 +307,13 @@ OBJECT_NAME_MAP: Dict[str, List[str]] = {
     # We use the special key "_top_level" to indicate the endpoint's own
     # top-level fields should be checked.
     "sentiment": ["_top_level"],
+    # "tierData" is assigned from stats.performance_by_tier[tier] in CopyTrades.jsx.
+    # Its fields (total, executed, execution_rate, avg_confidence, avg_whale_score)
+    # are checked against the signal_stats endpoint's performance_by_tier nested shape.
+    "tierData": ["performance_by_tier"],
+    # "scoreData" is the response from /api/wallets/{wallet_id}/score — a flat object
+    # whose fields are checked against the wallet_score endpoint's top-level fields.
+    "scoreData": ["_top_level"],
 }
 
 
