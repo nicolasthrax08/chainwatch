@@ -4275,10 +4275,22 @@ def check_phase_timings_in_metrics(py_files: List[str], result: AuditResult):
 
 def check_no_duplicate_confidence_badge(jsx_files: list, result: AuditResult):
     """Audit check: ConfidenceBadge should be a shared component, not duplicated in pages."""
+    # Identify the canonical shared component file so we can exclude it from the
+    # "local definition" check below.  The shared file naturally defines
+    # CONFIDENCE_TIERS / ConfidenceBadge itself — that is not a duplicate.
+    shared_component_path = None
+    for fpath in jsx_files:
+        if "components/ConfidenceBadge" in fpath.replace("\\", "/"):
+            shared_component_path = fpath
+            break
+
     # Count how many files define their own CONFIDENCE_TIERS or getConfidenceTier
     files_with_local_def = []
     files_with_import = []
     for fpath in jsx_files:
+        # Skip the shared component file itself — it is the canonical definition
+        if fpath == shared_component_path:
+            continue
         try:
             src = open(fpath).read()
         except Exception:
