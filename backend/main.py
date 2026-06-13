@@ -2421,7 +2421,7 @@ async def get_next_task():
     """
     Fetch the next pending task for the cron agent.
     Atomically marks the task as 'running' to prevent double-processing.
-    No authentication required — called from within the Zeabur network only.
+    Requires CRON_SECRET header (Bearer token) for authentication.
     """
     async with acquire_db() as conn:
         row = await conn.fetchrow(
@@ -2635,11 +2635,13 @@ async def health_check():
 async def health_metrics_endpoint():
     """
     Expose per-endpoint latency percentiles and error rates collected by
-    MetricsMiddleware + health_metrics. Useful for the cron job and operators
-    to spot slow endpoints before they cause timeouts.
+    MetricsMiddleware + health_metrics, plus per-phase monitor timing.
+    Useful for the cron job and operators to spot slow endpoints and
+    slow monitor phases before they cause timeouts.
 
     Returns:
-        uptime, total request/error counts, and per-endpoint p50/p95/p99 latency.
+        uptime, total request/error counts, per-endpoint p50/p95/p99 latency,
+        and monitor phase timing breakdown.
     """
     try:
         from services.health_metrics import get_metrics
@@ -2649,6 +2651,12 @@ async def health_metrics_endpoint():
             content={"error": f"Metrics collection failed: {e}"},
             status_code=503,
         )
+    # Include per-phase monitor timing (Pitfall: monitor-phase-timing-dashboard-001)
+    try:
+        from services.monitor import get_phase_timings
+        metrics["monitor_phases"] = get_phase_timings()
+    except Exception:
+        metrics["monitor_phases"] = None
     return JSONResponse(content=metrics, status_code=200)
 
 
@@ -2690,15 +2698,24 @@ async def health_diagnostic():
                 except Exception as e:
                     db_resolution = f"FAILED: {e}"
         except Exception as e:
-            report["checks"]["db_url"] = {"error": f"Parse failed: {e}"}
-    report["checks"]["db_url"] = {
-        "configured": bool(db_url),
-        "host": db_host,
-        "port": db_port,
-        "database": db_name,
-        "resolved_ip": db_resolution,
-        "reachable": None,  # filled below
-    }
+            report["checks"]["db_url"] = {
+                "configured": bool(db_url),
+                "error": f"Parse failed: {e}",
+                "host": None,
+                "port": None,
+                "database": None,
+                "resolved_ip": None,
+                "reachable": None,
+            }
+        else:
+            report["checks"]["db_url"] = {
+                "configured": bool(db_url),
+                "host": db_host,
+                "port": db_port,
+                "database": db_name,
+                "resolved_ip": db_resolution,
+                "reachable": None,  # filled below
+            }
 
     # ── 2. DB connectivity test (with timeout) ──
     db_reachable = False

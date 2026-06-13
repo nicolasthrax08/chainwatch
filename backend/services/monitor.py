@@ -186,6 +186,27 @@ async def get_cycle_stats() -> dict:
     }
 
 
+def get_phase_timings() -> dict:
+    """
+    Return the latest monitor cycle's per-phase timing breakdown.
+    Useful for operators to identify slow phases without parsing logs.
+
+    Returns:
+        phase_durations_s: dict mapping phase_name → duration in seconds
+        last_cycle_s: total duration of the last full cycle
+        slow_phases: phases exceeding the warning threshold
+    """
+    _PHASE_WARN_THRESHOLD_S = 5.0
+    phases = dict(_phase_durations)
+    slow = {k: v for k, v in phases.items() if v > _PHASE_WARN_THRESHOLD_S}
+    return {
+        "phase_durations_s": phases,
+        "last_cycle_s": round(_last_cycle_duration, 2),
+        "slow_phases": slow,
+        "phase_count": len(phases),
+    }
+
+
 # ── Main Loop ─────────────────────────────────────────────────────────
 
 async def _monitor_loop() -> None:

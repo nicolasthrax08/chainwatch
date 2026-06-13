@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { API_BASE } from '../config';
 import { ChainBadge } from '../App';
+import { ConfidenceBadge } from '../components/ConfidenceBadge';
 
 async function apiFetch(path, token, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -95,24 +96,22 @@ function AnalyzeModal({ signal, currency, onMirror, onClose }) {
           ['Whale', signal.wallet_label],
           ['Address', signal.wallet_address ? truncateAddress(signal.wallet_address) : '—'],
           ['Amount', fmtTotal(signal.amount_usd, currency)],
-          ['Confidence', `${(signal.confidence_score * 100).toFixed(0)}%`],
-          ['Final Confidence', `${(signal.confidence_final * 100).toFixed(0)}%`],
+          ['Confidence', <ConfidenceBadge score={signal.confidence_score} />],
+          ['Final Confidence', <ConfidenceBadge score={signal.confidence_final} />],
           ['Whale Score (at signal)', signal.score_at_generation?.toFixed(2) ?? '—'],
           ['Status', signal.status],
           ['Detected', timeAgo(signal.created_at)],
         ].map(([label, value]) => (
-          <div key={label} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '13px' }}>
+          <div key={label} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '13px', alignItems: 'center' }}>
             <span style={{ color: '#8b8f98' }}>{label}</span>
-            <span style={{
-              color: label === 'Confidence'
-                ? (signal.confidence_score > 0.7 ? '#10b981' : '#f59e0b')
-                : label === 'Final Confidence'
-                ? (signal.confidence_final > 0.7 ? '#10b981' : '#f59e0b')
-                : label === 'Status'
-                ? (STATUS_COLORS[signal.status] || '#8b8f98')
-                : '#e2e8f0',
-              fontWeight: (label === 'Confidence' || label === 'Final Confidence') ? 600 : 400,
-            }}>{value}</span>
+            {React.isValidElement(value) ? value : (
+              <span style={{
+                color: label === 'Status'
+                  ? (STATUS_COLORS[signal.status] || '#8b8f98')
+                  : '#e2e8f0',
+                fontWeight: 400,
+              }}>{value}</span>
+            )}
           </div>
         ))}
 
@@ -429,11 +428,13 @@ function SignalHistory({ token, currency }) {
                       <td style={{ padding: '6px 8px', color: '#8b8f98', maxWidth: '100px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={s.wallet_address}>
                         {s.wallet_label || truncateAddress(s.wallet_address)}
                       </td>
-                      <td style={{ padding: '6px 8px', color: s.confidence_score > 0.7 ? '#10b981' : '#f59e0b' }}>
-                        {(s.confidence_score * 100).toFixed(0)}%
+                      <td style={{ padding: '6px 8px' }}>
+                        <ConfidenceBadge score={s.confidence_score} size="sm" />
                       </td>
-                      <td style={{ padding: '6px 8px', color: s.confidence_final > 0.7 ? '#10b981' : '#f59e0b' }}>
-                        {(s.confidence_final * 100).toFixed(0)}%
+                      <td style={{ padding: '6px 8px' }}>
+                        {s.confidence_final != null
+                          ? <ConfidenceBadge score={s.confidence_final} size="sm" />
+                          : <span style={{ color: '#6b7280' }}>—</span>}
                       </td>
                       <td style={{ padding: '6px 8px' }}>
                         <span style={{
@@ -572,18 +573,9 @@ function CopyTrades({ token, currency }) {
                   )}
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-                  <span className="signal-confidence" style={{
-                    color: s.confidence_score > 0.7 ? '#10b981' : '#f59e0b', fontSize: '0.9rem',
-                  }}>
-                    {(s.confidence_score * 100).toFixed(0)}%
-                  </span>
+                  <ConfidenceBadge score={s.confidence_score} />
                   {s.confidence_final != null && (
-                    <span style={{
-                      fontSize: '0.7rem', color: '#8b8f98', padding: '1px 5px',
-                      border: '1px solid rgba(139,143,152,0.2)', borderRadius: '3px',
-                    }}>
-                      final: {(s.confidence_final * 100).toFixed(0)}%
-                    </span>
+                    <ConfidenceBadge score={s.confidence_final} label="final" />
                   )}
                   <button
                     className="btn btn-success btn-sm"

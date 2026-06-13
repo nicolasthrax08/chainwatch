@@ -3946,6 +3946,8 @@ def run_audit(base_path: str) -> AuditResult:
     check_whale_sentiment_buy_inflow(py_files, result)
     check_signal_stats_field_contract(py_files, result)
     check_mirror_trade_rate_limit(py_files, result)
+    check_phase_timings_in_metrics(py_files, result)
+    check_no_duplicate_confidence_badge(jsx_files, result)
 
     return result
 
@@ -4219,6 +4221,94 @@ def check_mirror_trade_rate_limit(py_files: List[str], result: AuditResult):
                 "Add a per-user token-bucket rate limiter (e.g., 10 req/min)."
             ),
         ))
+
+
+def check_phase_timings_in_metrics(py_files: List[str], result: AuditResult):
+    """Audit check: /api/health/metrics must include monitor_phases from get_phase_timings()."""
+    found_import = False
+    found_call = False
+    for fpath in py_files:
+        try:
+            src = open(fpath).read()
+        except Exception:
+            continue
+        if "health_metrics_endpoint" in src or "health/metrics" in src:
+            if "get_phase_timings" in src:
+                found_import = True
+                # Verify the function is actually called (not just imported)
+                if "monitor_phases" in src:
+                    found_call = True
+
+    if found_import and found_call:
+        result.add_pass(
+            "health/metrics endpoint includes monitor_phases from get_phase_timings()"
+        )
+    elif found_import and not found_call:
+        result.add(Finding(
+            pitfall="phase-timings-not-wired",
+            severity="minor",
+            file="backend/main.py",
+            line=0,
+            description=(
+                "get_phase_timings is imported in health_metrics_endpoint but "
+                "monitor_phases is not set in the response dict."
+            ),
+            suggestion="Add metrics[\"monitor_phases\"] = get_phase_timings() in the endpoint.",
+        ))
+    else:
+        result.add(Finding(
+            pitfall="phase-timings-not-wired",
+            severity="minor",
+            file="backend/main.py",
+            line=0,
+            description=(
+                "/api/health/metrics does not include monitor phase timing data. "
+                "The get_phase_timings() function exists in services/monitor.py "
+                "but is not wired into the metrics endpoint."
+            ),
+            suggestion=(
+                "Import get_phase_timings in health_metrics_endpoint and add "
+                "metrics[\"monitor_phases\"] = get_phase_timings()."
+            ),
+        ))
+
+
+def check_no_duplicate_confidence_badge(jsx_files: list, result: AuditResult):
+    """Audit check: ConfidenceBadge should be a shared component, not duplicated in pages."""
+    # Count how many files define their own CONFIDENCE_TIERS or getConfidenceTier
+    files_with_local_def = []
+    files_with_import = []
+    for fpath in jsx_files:
+        try:
+            src = open(fpath).read()
+        except Exception:
+            continue
+        has_local_tiers = "CONFIDENCE_TIERS" in src and "const CONFIDENCE_TIERS" in src
+        has_local_getter = "function getConfidenceTier(" in src or "function getDashboardConfidenceTier(" in src
+        has_local_badge = "function ConfidenceBadge(" in src or "function DashboardConfidenceBadge(" in src
+        has_import = "from '../components/ConfidenceBadge'" in src or "from './components/ConfidenceBadge'" in src
+        if has_local_tiers or has_local_getter or has_local_badge:
+            files_with_local_def.append(fpath)
+        if has_import:
+            files_with_import.append(fpath)
+
+    if files_with_local_def:
+        for f in files_with_local_def:
+            result.add(Finding(
+                pitfall="duplicate-confidence-badge",
+                severity="minor",
+                file=f,
+                line=0,
+                description=(
+                    "ConfidenceBadge component is defined locally in this file "
+                    "instead of importing from components/ConfidenceBadge."
+                ),
+                suggestion="Import ConfidenceBadge from '../components/ConfidenceBadge'.",
+            ))
+    else:
+        result.add_pass(
+            "ConfidenceBadge is a shared component — no duplicate definitions in page files"
+        )
 
 
 def main():

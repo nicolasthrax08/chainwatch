@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 
 import { API_BASE } from '../config';
 import { ChainBadge } from '../App';
+import { ConfidenceBadge } from '../components/ConfidenceBadge';
 
 async function apiFetch(path, token, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -348,24 +349,22 @@ function DashboardAnalyzeModal({ signal, currency, onMirror, onClose }) {
           ['Whale', signal.wallet_label],
           ['Address', signal.wallet_address ? `${signal.wallet_address.slice(0, 6)}...${signal.wallet_address.slice(-4)}` : '—'],
           ['Amount', fmtTotal(signal.amount_usd, currency)],
-          ['Confidence', `${(signal.confidence_score * 100).toFixed(0)}%`],
-          ['Final Confidence', `${(signal.confidence_final * 100).toFixed(0)}%`],
+          ['Confidence', <ConfidenceBadge score={signal.confidence_score} />],
+          ['Final Confidence', <ConfidenceBadge score={signal.confidence_final} />],
           ['Whale Score (at signal)', signal.score_at_generation?.toFixed(2) ?? '—'],
           ['Status', signal.status],
           ['Detected', timeAgo(signal.created_at)],
         ].map(([label, value]) => (
-          <div key={label} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '13px' }}>
+          <div key={label} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid rgba(255,255,255,0.05)', fontSize: '13px', alignItems: 'center' }}>
             <span style={{ color: '#8b8f98' }}>{label}</span>
-            <span style={{
-              color: label === 'Confidence'
-                ? (signal.confidence_score > 0.7 ? '#10b981' : '#f59e0b')
-                : label === 'Final Confidence'
-                ? (signal.confidence_final > 0.7 ? '#10b981' : '#f59e0b')
-                : label === 'Status'
-                ? (DASHBOARD_STATUS_COLORS[signal.status] || '#8b8f98')
-                : '#e2e8f0',
-              fontWeight: (label === 'Confidence' || label === 'Final Confidence') ? 600 : 400,
-            }}>{value}</span>
+            {React.isValidElement(value) ? value : (
+              <span style={{
+                color: label === 'Status'
+                  ? (DASHBOARD_STATUS_COLORS[signal.status] || '#8b8f98')
+                  : '#e2e8f0',
+                fontWeight: 400,
+              }}>{value}</span>
+            )}
           </div>
         ))}
 
@@ -866,18 +865,9 @@ function Dashboard({ token, currency }) {
                     </div>
                   )}
                 </div>
-                <span className="signal-confidence" style={{
-                  color: s.confidence_score > 0.7 ? '#10b981' : '#f59e0b'
-                }}>
-                  {(s.confidence_score * 100).toFixed(0)}%
-                </span>
+                <ConfidenceBadge score={s.confidence_score} />
                 {s.confidence_final != null && (
-                  <span style={{
-                    fontSize: '0.7rem', color: '#8b8f98', padding: '1px 5px',
-                    border: '1px solid rgba(139,143,152,0.2)', borderRadius: '3px',
-                  }}>
-                    final: {(s.confidence_final * 100).toFixed(0)}%
-                  </span>
+                  <ConfidenceBadge score={s.confidence_final} label="final" />
                 )}
                 <button
                   className="btn btn-success btn-sm"

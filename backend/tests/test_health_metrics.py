@@ -436,7 +436,7 @@ class TestHealthMetricsEndpoint:
         expected_keys = {
             "uptime_seconds", "uptime_human", "request_count", "error_count",
             "error_rate", "db_query_count", "db_error_count", "db_error_rate",
-            "endpoint_latency",
+            "endpoint_latency", "monitor_phases",
         }
         assert set(data.keys()) == expected_keys
 
