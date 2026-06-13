@@ -1426,6 +1426,10 @@ def check_frontend_backend_field_contract(py_files: List[str], jsx_files: List[s
         '/api/whale-sentiment': {
             'sentiment_score', 'classification', 'inflow_usd', 'outflow_usd', 'tx_count',
         },
+        '/api/whale-sentiment/history': {
+            'days', 'history',
+            'date', 'sentiment_score', 'inflow_usd', 'outflow_usd', 'tx_count',
+        },
         '/api/signals/history': {
             'signals', 'count',
             'id', 'token_symbol', 'action', 'amount_usd', 'confidence_score',
@@ -1439,7 +1443,7 @@ def check_frontend_backend_field_contract(py_files: List[str], jsx_files: List[s
 
     # Map JSX files to their primary API endpoints
     jsx_endpoint_map = {
-        'Dashboard.jsx': ['/api/dashboard', '/api/whale-sentiment', '/api/signals/history'],
+        'Dashboard.jsx': ['/api/dashboard', '/api/whale-sentiment', '/api/whale-sentiment/history', '/api/signals/history'],
         'CopyTrades.jsx': ['/api/signals', '/api/signals/history'],
         'Wallets.jsx': ['/api/wallets', '/api/whale-suggestions'],
         'Activity.jsx': ['/api/activity'],
@@ -3960,7 +3964,9 @@ def check_whale_sentiment_buy_inflow(py_files: List[str], result: AuditResult):
             result.add_pass("whale_sentiment: buy txns counted as inflow")
             continue
         # Skip test files — they reference endpoint names but don't define the function
-        if fpath.endswith("test_main_endpoints.py") or fpath.endswith("conftest.py"):
+        if (fpath.endswith("test_main_endpoints.py") or fpath.endswith("conftest.py")
+                or fpath.endswith("test_whale_sentiment_history.py")
+                or fpath.endswith("verify_deploy.py")):
             result.add_pass("whale_sentiment: buy txns counted as inflow")
             continue
 
@@ -4012,7 +4018,8 @@ def check_signal_stats_field_contract(py_files: List[str], result: AuditResult):
             result.add_pass("signal_stats: field contract includes all frontend-accessed fields")
             continue
         # Skip test files — they reference field names in mock data, not the actual endpoint
-        if fpath.endswith("test_signal_stats.py") or fpath.endswith("test_main_endpoints.py") or fpath.endswith("conftest.py"):
+        if (fpath.endswith("test_signal_stats.py") or fpath.endswith("test_main_endpoints.py")
+                or fpath.endswith("conftest.py") or fpath.endswith("verify_deploy.py")):
             result.add_pass("signal_stats: field contract includes all frontend-accessed fields")
             continue
 

@@ -45,31 +45,81 @@ except ImportError:
 
 # ─── Source-defined endpoints (extracted from backend/main.py OpenAPI spec) ───
 EXPECTED_ENDPOINTS = {
+    # Auth
     ("GET", "/api/auth/challenge"),
     ("POST", "/api/auth/challenge"),
     ("POST", "/api/auth/verify"),
     ("GET", "/api/auth/me"),
-    ("GET", "/api/dashboard/"),
+    # User settings
+    ("POST", "/api/user/alpaca"),
+    ("DELETE", "/api/user/alpaca"),
+    ("POST", "/api/user/telegram"),
+    ("DELETE", "/api/user/telegram"),
+    ("GET", "/api/user/alpaca/status"),
+    # Dashboard & wallets
     ("GET", "/api/dashboard"),
     ("GET", "/api/wallets"),
     ("POST", "/api/wallets"),
+    ("PUT", "/api/wallets/{wallet_id}"),
+    ("DELETE", "/api/wallets/{wallet_id}"),
+    ("POST", "/api/wallets/{wallet_id}/refresh"),
+    ("GET", "/api/wallets/{wallet_id}/transactions"),
+    ("GET", "/api/wallets/{wallet_id}/score"),
+    # Whale
     ("GET", "/api/whale-suggestions"),
+    ("GET", "/api/whale-sentiment"),
+    ("GET", "/api/whale-sentiment/history"),
+    # Activity
     ("GET", "/api/activity"),
+    # Alerts
     ("GET", "/api/alerts"),
     ("POST", "/api/alerts"),
+    ("PUT", "/api/alerts/{alert_id}"),
+    ("DELETE", "/api/alerts/{alert_id}"),
+    ("GET", "/api/alerts/history"),
+    # Signals
     ("GET", "/api/signals"),
+    ("GET", "/api/signals/stats"),
+    ("GET", "/api/signals/history"),
+    ("POST", "/api/signals/{signal_id}/explain"),
+    ("POST", "/api/signals/{signal_id}/mirror"),
+    # Health
     ("GET", "/api/health"),
+    ("GET", "/api/health/metrics"),
+    ("GET", "/api/health/diagnostic"),
+    ("GET", "/api/health/startup-log"),
 }
 
 # Endpoints that should require authentication (return 401 without Bearer token)
 AUTH_REQUIRED_ENDPOINTS = [
     ("GET", "/api/wallets"),
+    ("POST", "/api/wallets"),
+    ("PUT", "/api/wallets/{wallet_id}"),
+    ("DELETE", "/api/wallets/{wallet_id}"),
+    ("POST", "/api/wallets/{wallet_id}/refresh"),
+    ("GET", "/api/wallets/{wallet_id}/transactions"),
+    ("GET", "/api/wallets/{wallet_id}/score"),
     ("GET", "/api/whale-suggestions"),
+    ("GET", "/api/whale-sentiment"),
+    ("GET", "/api/whale-sentiment/history"),
     ("GET", "/api/alerts"),
+    ("POST", "/api/alerts"),
+    ("PUT", "/api/alerts/{alert_id}"),
+    ("DELETE", "/api/alerts/{alert_id}"),
+    ("GET", "/api/alerts/history"),
     ("GET", "/api/signals"),
+    ("GET", "/api/signals/stats"),
+    ("GET", "/api/signals/history"),
+    ("POST", "/api/signals/{signal_id}/explain"),
+    ("POST", "/api/signals/{signal_id}/mirror"),
     ("GET", "/api/dashboard"),
     ("GET", "/api/auth/me"),
     ("GET", "/api/activity"),
+    ("POST", "/api/user/alpaca"),
+    ("DELETE", "/api/user/alpaca"),
+    ("POST", "/api/user/telegram"),
+    ("DELETE", "/api/user/telegram"),
+    ("GET", "/api/user/alpaca/status"),
 ]
 
 # Columns that MUST exist in the schema (from migrations 001-007)
