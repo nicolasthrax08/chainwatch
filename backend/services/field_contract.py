@@ -247,10 +247,22 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
             "inflow_usd", "outflow_usd", "tx_count",
         },
     ),
+    # GET /api/whale-sentiment/history — daily sentiment time-series
+    EndpointResponse(
+        name="whale_sentiment_history",
+        method="GET",
+        path="/api/whale-sentiment/history",
+        fields={
+            "days", "history",
+        },
+        nested={
+            "history": {"date", "sentiment_score", "inflow_usd", "outflow_usd", "tx_count"},
+        },
+    ),
 ]
 
+
 # ─── WebSocket message shape registry ──────────────────────────────────
-# These are the shapes pushed by the backend via websocket_manager.send_to_user()
 # (from monitor.py Phase 6a/6b). Frontend consumes these in App.jsx ws.onmessage.
 # Format: WS_MESSAGE_SHAPES[msg_type][msg_action] = {field_names}
 
@@ -314,6 +326,9 @@ OBJECT_NAME_MAP: Dict[str, List[str]] = {
     # "scoreData" is the response from /api/wallets/{wallet_id}/score — a flat object
     # whose fields are checked against the wallet_score endpoint's top-level fields.
     "scoreData": ["_top_level"],
+    # "sentimentHistory" is the response from /api/whale-sentiment/history — a flat object
+    # with "days" (int) and "history" (list of daily entries) top-level fields.
+    "sentimentHistory": ["_top_level"],
 }
 
 
@@ -524,6 +539,13 @@ def find_frontend_field_accesses(base_path: str) -> List[FieldAccess]:
                             "componentWillUnmount", "shouldComponentUpdate",
                             "defaultProps", "propTypes", "displayName",
                             "context", "refs", "updater", "isReactComponent",
+                            # JS built-in Array/String methods commonly used in React
+                            "slice", "splice", "concat", "join", "split",
+                            "includes", "indexOf", "lastIndexOf",
+                            "substring", "toLowerCase", "toUpperCase",
+                            "trim", "replace", "match", "charAt",
+                            "toFixed", "toLocaleString", "getTime",
+                            "getFullYear", "getMonth", "getDate",
                         }:
                             continue
 

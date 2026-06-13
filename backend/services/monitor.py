@@ -11,7 +11,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, Optional, Set, Tuple, Any
 
 import asyncpg
 
@@ -60,13 +60,13 @@ _last_cycle_duration: float = 0.0  # seconds, most recent poll cycle
 # Price cache for USD conversion (CoinGecko, refreshed every 60s)
 # Initialized with sane defaults so a failed first fetch still produces reasonable USD values.
 # These are rough reference prices; CoinGecko will overwrite them on first successful fetch.
-_price_cache: Dict[str, float] = {
+_price_cache: Dict[str, Any] = {
     "ETH": 2500.0,
     "SOL": 170.0,
     "BTC": 105000.0,
     "USDHKD": 7.8,
     "USDBTC": 1.0 / 105000.0,
-    "timestamp": 0.0,
+    "timestamp": None,  # None = never updated (sentinel); 0.0 caused epoch-age display bug
 }
 
 # Event used by _ensure_prices_fetched to make concurrent callers wait for

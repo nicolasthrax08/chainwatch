@@ -392,6 +392,123 @@ function DashboardAnalyzeModal({ signal, currency, onMirror, onClose }) {
   );
 }
 
+function SentimentHistory({ token }) {
+  const [sentimentHistory, setSentimentHistory] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const data = await apiFetch('/whale-sentiment/history', token);
+        if (!cancelled) setSentimentHistory(data);
+      } catch {
+        // Silently fail — sentiment history is non-critical
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    const interval = setInterval(load, 120000); // refresh every 2 min
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [token]);
+
+  if (loading || !sentimentHistory || !sentimentHistory.history) return null;
+
+  const history = sentimentHistory.history;
+  const maxTxCount = Math.max(...history.map(d => d.tx_count), 1);
+
+  // Compute 7-day moving average for trend line
+  const ma7 = history.map((d, i) => {
+    const window = history.slice(Math.max(0, i - 6), i + 1);
+    const avg = window.reduce((s, x) => s + x.sentiment_score, 0) / window.length;
+    return { date: d.date, score: avg };
+  });
+
+  // Determine overall trend direction
+  const firstWeek = ma7.slice(0, 7);
+  const lastWeek = ma7.slice(-7);
+  const firstAvg = firstWeek.reduce((s, x) => s + x.score, 0) / firstWeek.length;
+  const lastAvg = lastWeek.reduce((s, x) => s + x.score, 0) / lastWeek.length;
+  const trendDir = lastAvg > firstAvg + 0.02 ? 'up' : lastAvg < firstAvg - 0.02 ? 'down' : 'flat';
+  const trendColor = trendDir === 'up' ? '#10b981' : trendDir === 'down' ? '#ef4444' : '#f59e0b';
+  const trendLabel = trendDir === 'up' ? 'Trending Bullish' : trendDir === 'down' ? 'Trending Bearish' : 'Sideways';
+
+  return (
+    <div
+      className="card"
+      style={{
+        marginBottom: '20px',
+        padding: '16px 20px',
+        border: '1px solid rgba(139,92,246,0.15)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span style={{ fontSize: '0.9rem' }}>📈</span>
+          <span style={{ fontWeight: 700, fontSize: '0.8rem', color: '#c4b5fd', letterSpacing: '0.5px' }}>
+            30-DAY SENTIMENT TREND
+          </span>
+        </div>
+        <span style={{
+          fontSize: '0.7rem',
+          fontWeight: 600,
+          color: trendColor,
+          background: trendColor + '18',
+          padding: '2px 8px',
+          borderRadius: '6px',
+        }}>
+          {trendLabel}
+        </span>
+      </div>
+
+      {/* Sparkline bar chart */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'flex-end',
+        gap: '2px',
+        height: '64px',
+        marginBottom: '8px',
+      }}>
+        {history.map((d, i) => {
+          const height = d.tx_count > 0
+            ? Math.max(4, (d.tx_count / maxTxCount) * 100)
+            : 3;
+          const score = d.sentiment_score;
+          // Color based on sentiment: red (0) → amber (0.5) → green (1)
+          const barColor = score > 0.6 ? '#10b981'
+            : score > 0.4 ? '#f59e0b'
+            : '#ef4444';
+          return (
+            <div
+              key={d.date}
+              title={`${d.date}: ${(score * 100).toFixed(0)}% (${d.tx_count} txns)`}
+              style={{
+                flex: 1,
+                height: `${height}%`,
+                background: barColor,
+                borderRadius: '2px 2px 0 0',
+                opacity: d.tx_count > 0 ? 0.8 : 0.2,
+                minWidth: '2px',
+                cursor: 'default',
+              }}
+            />
+          );
+        })}
+      </div>
+
+      {/* Moving average line as SVG overlay info */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.65rem', color: '#8b8f98' }}>
+        <span>30 days ago</span>
+        <span style={{ color: '#6b7280' }}>
+          {history.filter(d => d.tx_count > 0).reduce((s, d) => s + d.tx_count, 0)} total txns
+        </span>
+        <span>Today</span>
+      </div>
+    </div>
+  );
+}
+
 function Dashboard({ token, currency }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -546,6 +663,9 @@ function Dashboard({ token, currency }) {
           </span>
         </div>
       </div>
+
+      {/* Sentiment Trend Chart */}
+      <SentimentHistory token={token} />
 
       {/* Stats bar */}
       <div className="stats-bar">

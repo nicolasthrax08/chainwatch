@@ -145,7 +145,7 @@ def _check_mirror_rate_limit(user_id: str) -> bool:
 _dashboard_price_cache: dict = {
     "USDHKD": 7.8,
     "USDBTC": 1.0 / 105000.0,
-    "timestamp": 0.0,
+    "timestamp": None,  # None = never updated (sentinel)
 }
 _dashboard_price_lock = asyncio.Lock()
 
@@ -162,13 +162,17 @@ async def _fetch_dashboard_prices() -> dict:
     cache = _dashboard_price_cache
 
     # Fast path: no lock needed for a fresh read
-    if cache["timestamp"] > 0 and now - cache["timestamp"] < 120:
+    # timestamp is initialized to None (sentinel); must None-check before arithmetic
+    # (Pitfall #5: cache sentinel must be comparison-safe)
+    _ts = cache.get("timestamp")
+    if _ts is not None and now - _ts < 120:
         return cache
 
     # Slow path: acquire lock to avoid duplicate HTTP calls
     async with _dashboard_price_lock:
         # Re-check after acquiring lock — another coroutine may have refreshed
-        if cache["timestamp"] > 0 and time.time() - cache["timestamp"] < 120:
+        _ts2 = cache.get("timestamp")
+        if _ts2 is not None and time.time() - _ts2 < 120:
             return cache
 
         try:
@@ -2292,6 +2296,83 @@ async def get_whale_sentiment(user: dict = Depends(get_current_user)):
     }
 
 
+@app.get("/api/whale-sentiment/history")
+async def get_whale_sentiment_history(
+    days: int = Query(30, ge=1, le=90),
+    user: dict = Depends(get_current_user),
+):
+    """
+    Daily whale sentiment time-series for charting.
+
+    Aggregates transactions from all tracked whale wallets per day
+    and computes a daily sentiment score.
+
+    Returns a list of {date, sentiment_score, inflow_usd, outflow_usd, tx_count}
+    ordered by date ASC, with one entry per day. Days with no whale
+    transactions are included with neutral sentiment (0.5).
+    """
+    async with acquire_db() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT
+                DATE(t.timestamp) AS day,
+                COUNT(*) AS tx_count,
+                SUM(t.usd_value) FILTER (WHERE t.type IN ('receive', 'buy')) AS inflow_usd,
+                SUM(t.usd_value) FILTER (WHERE t.type = 'send') AS outflow_usd
+            FROM transactions t
+            JOIN wallets w ON w.id = t.wallet_id
+            WHERE w.user_id = $1
+              AND w.is_whale = TRUE
+              AND t.timestamp >= NOW() - make_interval(days => $2)
+            GROUP BY DATE(t.timestamp)
+            ORDER BY day ASC
+            """,
+            user["id"],
+            days,
+        )
+
+    # Build a lookup from date → row
+    from datetime import date, timedelta
+    today = date.today()
+    # Build dense output: one entry per day, even if no txns
+    history = []
+    day_map = {}
+    for r in rows:
+        d = r["day"]
+        if isinstance(d, str):
+            d = date.fromisoformat(d)
+        day_map[d] = r
+
+    for i in range(days - 1, -1, -1):
+        d = today - timedelta(days=i)
+        if d in day_map:
+            r = day_map[d]
+            inflow = float(r["inflow_usd"] or 0)
+            outflow = float(r["outflow_usd"] or 0)
+            total = inflow + outflow
+            score = round(inflow / total, 4) if total > 0 else 0.5
+            history.append({
+                "date": d.isoformat(),
+                "sentiment_score": score,
+                "inflow_usd": round(inflow, 2),
+                "outflow_usd": round(outflow, 2),
+                "tx_count": r["tx_count"],
+            })
+        else:
+            history.append({
+                "date": d.isoformat(),
+                "sentiment_score": 0.5,
+                "inflow_usd": 0.0,
+                "outflow_usd": 0.0,
+                "tx_count": 0,
+            })
+
+    return {
+        "days": days,
+        "history": history,
+    }
+
+
 class TaskCreateRequest(BaseModel):
     task_type: str = Field(default="unknown", max_length=50)
     payload: dict = Field(default_factory=dict)
@@ -2500,10 +2581,11 @@ async def health_check():
     # ── Price cache freshness ──
     try:
         from services.monitor import _price_cache
-        cache_age = _time.time() - _price_cache.get("timestamp", 0)
+        _ts = _price_cache.get("timestamp")
+        cache_age = None if _ts is None else _time.time() - _ts
         report["subsystems"]["price_cache"] = {
-            "fresh": cache_age < 120,
-            "age_seconds": round(cache_age, 1),
+            "fresh": cache_age is not None and cache_age < 120,
+            "age_seconds": round(cache_age, 1) if cache_age is not None else None,
             "eth": _price_cache.get("ETH", 0),
             "sol": _price_cache.get("SOL", 0),
             "btc": _price_cache.get("BTC", 0),
@@ -2513,10 +2595,11 @@ async def health_check():
 
     # ── Dashboard price cache (CoinGecko cross-rates) ──
     try:
-        cache_age = _time.time() - _dashboard_price_cache.get("timestamp", 0)
+        _ts = _dashboard_price_cache.get("timestamp")
+        cache_age = None if _ts is None else _time.time() - _ts
         report["subsystems"]["dashboard_prices"] = {
-            "fresh": cache_age < 300,
-            "age_seconds": round(cache_age, 1),
+            "fresh": cache_age is not None and cache_age < 300,
+            "age_seconds": round(cache_age, 1) if cache_age is not None else None,
             "usd_hkd": _dashboard_price_cache.get("USDHKD", 0),
             "usd_btc": _dashboard_price_cache.get("USDBTC", 0),
         }
@@ -2669,13 +2752,14 @@ async def health_diagnostic():
     try:
         from services.monitor import is_monitor_alive, _price_cache, POLL_INTERVAL, MAX_CONSECUTIVE_ERRORS
         monitor_alive = is_monitor_alive()
-        cache_age = _time.time() - _price_cache.get("timestamp", 0)
+        _pc_ts = _price_cache.get("timestamp")
+        cache_age = None if _pc_ts is None else _time.time() - _pc_ts
         report["checks"]["monitor"] = {
             "alive": monitor_alive,
             "poll_interval_s": POLL_INTERVAL,
             "max_consecutive_errors": MAX_CONSECUTIVE_ERRORS,
-            "price_cache_age_s": round(cache_age, 1),
-            "price_cache_fresh": cache_age < 120,
+            "price_cache_age_s": round(cache_age, 1) if cache_age is not None else None,
+            "price_cache_fresh": cache_age is not None and cache_age < 120,
             "price_cache_eth": _price_cache.get("ETH", 0),
             "price_cache_sol": _price_cache.get("SOL", 0),
             "price_cache_btc": _price_cache.get("BTC", 0),
