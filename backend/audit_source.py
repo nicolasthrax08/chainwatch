@@ -3948,6 +3948,7 @@ def run_audit(base_path: str) -> AuditResult:
     check_mirror_trade_rate_limit(py_files, result)
     check_phase_timings_in_metrics(py_files, result)
     check_no_duplicate_confidence_badge(jsx_files, result)
+    check_jose_not_imported_in_tests(py_files, result)
 
     return result
 
@@ -4271,6 +4272,45 @@ def check_phase_timings_in_metrics(py_files: List[str], result: AuditResult):
                 "metrics[\"monitor_phases\"] = get_phase_timings()."
             ),
         ))
+
+
+def check_jose_not_imported_in_tests(py_files: List[str], result: AuditResult):
+    """Audit check: test files should not import python-jose when project uses pyjwt.
+
+    Pitfall: test_main_endpoints.py used 'from jose import jwt' (python-jose)
+    while requirements.txt only has pyjwt==2.8.0. This caused 17 test failures.
+    Test files should use 'import jwt' (pyjwt) to match the project's dependency.
+    """
+    jose_imports = []
+    for fpath in py_files:
+        # Skip __pycache__ files
+        if "__pycache__" in fpath:
+            continue
+        try:
+            src = open(fpath).read()
+        except Exception:
+            continue
+        # Look for 'from jose' or 'import jose' patterns
+        for i, line in enumerate(src.splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("from jose ") or stripped.startswith("import jose"):
+                jose_imports.append((fpath, i, stripped))
+
+    if jose_imports:
+        for fpath, line_num, line_text in jose_imports:
+            result.add(Finding(
+                pitfall="jose-instead-of-pyjwt",
+                severity="critical",
+                file=fpath,
+                line=line_num,
+                description=(
+                    f"File imports python-jose ('{line_text}') but project uses pyjwt. "
+                    "This causes ModuleNotFoundError at test time."
+                ),
+                suggestion="Replace with 'import jwt' (pyjwt is in requirements.txt).",
+            ))
+    else:
+        result.add_pass("No files import python-jose — all use pyjwt consistently")
 
 
 def check_no_duplicate_confidence_badge(jsx_files: list, result: AuditResult):
