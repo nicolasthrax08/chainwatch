@@ -157,8 +157,8 @@ class BlockchairClient:
                 "balance_satoshis": balance_sat,
                 "tx_count": stats.get("tx_count", 0)
             }
-        except httpx.HTTPError as e:
-            # Fallback: try BlockCypher
+        except Exception as e:
+            # Fallback: try BlockCypher on any failure (HTTP, JSON decode, etc.)
             try:
                 resp = await client.get(
                     f"{BLOCKCYPHER_BASE}/addrs/{address}/balance"
@@ -172,7 +172,7 @@ class BlockchairClient:
                     "balance_satoshis": balance_sat,
                     "tx_count": data.get("n_tx", 0)
                 }
-            except httpx.HTTPError as e2:
+            except Exception as e2:
                 return {"address": address, "balance_btc": 0, "error": str(e2)}
 
     async def get_transactions(self, address: str, limit: int = 20) -> List[Dict]:

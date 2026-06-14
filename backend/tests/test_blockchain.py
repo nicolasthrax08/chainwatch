@@ -380,6 +380,56 @@ class TestBlockchairClient:
         assert "error" in result
 
     @pytest.mark.asyncio
+    async def test_get_balance_json_error_triggers_fallback(self):
+        """Non-HTTP errors (e.g. JSON decode) should trigger BlockCypher fallback."""
+        client = BlockchairClient()
+
+        # First call returns invalid JSON (triggers ValueError in resp.json())
+        bad_json_resp = MagicMock()
+        bad_json_resp.raise_for_status = MagicMock()
+        bad_json_resp.json.side_effect = ValueError("Invalid JSON")
+
+        # Second call (BlockCypher fallback) succeeds
+        fallback_resp = MagicMock()
+        fallback_resp.json.return_value = {
+            "balance": 200000000,  # 2 BTC
+            "n_tx": 10
+        }
+        fallback_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(side_effect=[bad_json_resp, fallback_resp])
+        mock_http.is_closed = False
+        client._client = mock_http
+
+        result = await client.get_balance("1D" * 33)
+        assert result["balance_btc"] == 2.0
+        assert result["tx_count"] == 10
+
+    @pytest.mark.asyncio
+    async def test_get_balance_json_error_both_fail(self):
+        """Non-HTTP error on mempool + HTTP error on BlockCypher → error dict."""
+        client = BlockchairClient()
+
+        # First call returns invalid JSON
+        bad_json_resp = MagicMock()
+        bad_json_resp.raise_for_status = MagicMock()
+        bad_json_resp.json.side_effect = ValueError("Invalid JSON")
+
+        # Second call (BlockCypher) fails with HTTP error
+        fail_resp = MagicMock()
+        fail_resp.raise_for_status = MagicMock(side_effect=httpx.HTTPError("blockcypher down"))
+
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(side_effect=[bad_json_resp, fail_resp])
+        mock_http.is_closed = False
+        client._client = mock_http
+
+        result = await client.get_balance("1E" * 33)
+        assert result["balance_btc"] == 0
+        assert "error" in result
+
+    @pytest.mark.asyncio
     async def test_get_transactions_success(self):
         """Should parse transaction list from mempool.space."""
         client = BlockchairClient()
