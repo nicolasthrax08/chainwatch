@@ -3949,8 +3949,87 @@ def run_audit(base_path: str) -> AuditResult:
     check_phase_timings_in_metrics(py_files, result)
     check_no_duplicate_confidence_badge(jsx_files, result)
     check_jose_not_imported_in_tests(py_files, result)
+    check_duplicate_migration_ids(sql_files, result)
+    check_websocket_load_tests(py_files, result)
 
     return result
+
+
+def check_websocket_load_tests(py_files: List[str], result: AuditResult):
+    """
+    Verify that WebSocket load tests exist and cover concurrent connect,
+    broadcast under load, dead connection cleanup, and cap enforcement.
+    """
+    load_test_file = None
+    for fpath in py_files:
+        if fpath.endswith("test_websocket_load.py"):
+            load_test_file = fpath
+            break
+
+    if load_test_file is None:
+        result.add(Finding(
+            pitfall="ws-load-tests",
+            severity="minor",
+            file="tests/",
+            line=0,
+            description="No test_websocket_load.py found — WebSocketManager has no load/concurrency tests",
+            suggestion="Create tests/test_websocket_load.py with concurrent connect/send/broadcast tests",
+        ))
+        return
+
+    text = read_file(load_test_file)
+
+    # Check for concurrent connection test
+    if "asyncio.gather" in text and "connect" in text:
+        result.add_pass("ws-load: concurrent connection test exists")
+    else:
+        result.add(Finding(
+            pitfall="ws-load-tests",
+            severity="minor",
+            file=load_test_file,
+            line=0,
+            description="No concurrent connection test (asyncio.gather + connect)",
+            suggestion="Add test with asyncio.gather(*[manager.connect(...)]) to verify cap under concurrency",
+        ))
+
+    # Check for broadcast under load test
+    if "broadcast" in text and ("100" in text or "50" in text or "200" in text):
+        result.add_pass("ws-load: broadcast under load test exists")
+    else:
+        result.add(Finding(
+            pitfall="ws-load-tests",
+            severity="minor",
+            file=load_test_file,
+            line=0,
+            description="No broadcast-under-load test with many users",
+            suggestion="Add test that broadcasts to 100+ users and verifies delivery count",
+        ))
+
+    # Check for dead connection cleanup test
+    if "dead" in text.lower() and "cleanup" in text.lower():
+        result.add_pass("ws-load: dead connection cleanup test exists")
+    else:
+        result.add(Finding(
+            pitfall="ws-load-tests",
+            severity="minor",
+            file=load_test_file,
+            line=0,
+            description="No dead connection cleanup test under load",
+            suggestion="Add test that creates dead connections and verifies they are removed after send",
+        ))
+
+    # Check for cap enforcement test
+    if "MAX_CONNECTIONS_PER_USER" in text and ("50" in text or "concurrent" in text.lower()):
+        result.add_pass("ws-load: cap enforcement under concurrency test exists")
+    else:
+        result.add(Finding(
+            pitfall="ws-load-tests",
+            severity="minor",
+            file=load_test_file,
+            line=0,
+            description="No cap enforcement test under concurrent connections",
+            suggestion="Add test that fires 50+ concurrent connects for same user and verifies exactly MAX are accepted",
+        ))
 
 
 def check_whale_sentiment_buy_inflow(py_files: List[str], result: AuditResult):
@@ -4360,6 +4439,67 @@ def check_no_duplicate_confidence_badge(jsx_files: list, result: AuditResult):
     else:
         result.add_pass(
             "ConfidenceBadge is a shared component — no duplicate definitions in page files"
+        )
+
+
+def check_duplicate_migration_ids(sql_files: list, result: AuditResult):
+    """Audit check: No two migration files should share the same migration ID.
+
+    Duplicate migration IDs cause silent migration skips: whichever file is
+    alphabetically first gets applied and logged, and the other is treated as
+    already applied by check_migration_status.py (UNIQUE constraint on
+    _migration_log.migration_id).
+
+    This check extracts the migration ID from each .sql file using the same
+    logic as check_migration_status.py (_extract_migration_id) and flags
+    any duplicates.
+    """
+    import re
+
+    migration_ids: dict = {}  # migration_id → list of file paths
+
+    for fpath in sql_files:
+        try:
+            content = open(fpath).read()
+        except Exception:
+            continue
+
+        # Replicate _extract_migration_id logic
+        m = re.search(r'--\s*Migration ID:\s*(\S+)', content, re.IGNORECASE)
+        if m:
+            mid = m.group(1)
+        else:
+            m = re.search(r'--\s*(?:ChainWatch\s+)?Migration\s+(\d+)', content, re.IGNORECASE)
+            if m:
+                mid = f"migration_{m.group(1).zfill(3)}"
+            else:
+                base = os.path.splitext(os.path.basename(fpath))[0]
+                mid = base
+
+        migration_ids.setdefault(mid, []).append(fpath)
+
+    duplicates = {mid: files for mid, files in migration_ids.items() if len(files) > 1}
+
+    if duplicates:
+        for mid, files in sorted(duplicates.items()):
+            result.add(Finding(
+                pitfall="duplicate-migration-id",
+                severity="critical",
+                file=files[0],
+                line=1,
+                description=(
+                    f"Migration ID '{mid}' is shared by {len(files)} files: "
+                    + ", ".join(os.path.basename(f) for f in files)
+                    + ". One will be silently skipped during migration."
+                ),
+                suggestion=(
+                    "Renumber the migrations so each has a unique ID. "
+                    "Update the -- Migration N: header in each file."
+                ),
+            ))
+    else:
+        result.add_pass(
+            "No duplicate migration IDs — all migration files have unique IDs"
         )
 
 
