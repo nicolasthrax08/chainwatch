@@ -265,24 +265,25 @@ async def evaluate_for_signal(
     # Mark in in-memory cache BEFORE inserting (Finding 5: prevent race)
     _mark_signal(wallet_id, token_symbol, tx_type)
 
+    # ── Compute C_final = blend of C_tx and whale score W ────────────
+    c_tx = confidence
+    c_final = round(0.5 * c_tx + 0.5 * whale_score, 2)
+
     signal = await conn.fetchrow(
         """
         INSERT INTO copy_trade_signals
             (wallet_id, token_symbol, action, amount_usd, confidence_score,
-             score_at_generation, status)
-        VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+             confidence_final, score_at_generation, status)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
         ON CONFLICT (wallet_id, token_symbol, action, amount_usd) DO NOTHING
         RETURNING id, wallet_id, token_symbol, action, amount_usd,
-                  confidence_score, status, created_at
+                  confidence_score, confidence_final, status, created_at
         """,
         wallet_id, token_symbol, tx_type, round(amount_usd, 2), confidence,
-        whale_score,
+        c_final, whale_score,
     )
 
     if signal:
-        # ── Compute C_final = blend of C_tx and whale score W ────────
-        c_tx = confidence
-        c_final = round(0.5 * c_tx + 0.5 * whale_score, 2)
 
         # ── Build signal data for explanation ─────────────────────────
         signal_dict = dict(signal)

@@ -1641,10 +1641,7 @@ async def get_signals(
                 "action": s["action"],
                 "amount_usd": float(s["amount_usd"] or 0),
                 "confidence_score": float(s["confidence_score"] or 0),
-                "confidence_final": round(
-                    0.5 * float(s["confidence_score"] or 0)
-                    + 0.5 * float(s["score_at_generation"] or 0), 2
-                ),
+                "confidence_final": float(s.get("confidence_final") or 0),
                 "whale_score": float(s["whale_score"] or 0),
                 "wallet_address": s["wallet_address"],
                 "status": s["status"],
@@ -1807,7 +1804,8 @@ async def get_signal_history(
         rows = await conn.fetch(
             f"""
             SELECT cts.id, cts.token_symbol, cts.action, cts.amount_usd,
-                   cts.confidence_score, cts.score_at_generation,
+                   cts.confidence_score, cts.confidence_final,
+                   cts.score_at_generation,
                    cts.status, cts.explanation, cts.explanation_stale,
                    cts.created_at, cts.executed_at, cts.closed_at,
                    EXTRACT(EPOCH FROM (cts.closed_at - cts.created_at)) AS time_to_close_seconds,
@@ -1830,10 +1828,7 @@ async def get_signal_history(
                 "action": r["action"],
                 "amount_usd": float(r["amount_usd"] or 0),
                 "confidence_score": float(r["confidence_score"] or 0),
-                "confidence_final": round(
-                    0.5 * float(r["confidence_score"] or 0)
-                    + 0.5 * float(r["score_at_generation"] or 0), 2
-                ),
+                "confidence_final": float(r["confidence_final"] or 0),
                 "whale_score": float(r["whale_score"] or 0),
                 "score_at_generation": float(r["score_at_generation"] or 0),
                 "wallet_address": r["wallet_address"],

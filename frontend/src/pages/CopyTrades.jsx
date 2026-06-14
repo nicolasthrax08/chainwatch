@@ -115,6 +115,34 @@ function AnalyzeModal({ signal, currency, onMirror, onClose }) {
           </div>
         ))}
 
+        {/* Signal explanation — plain-English why this signal was generated */}
+        {signal.explanation && (
+          <div style={{
+            marginTop: '12px', padding: '10px 12px',
+            background: 'rgba(139,92,246,0.06)', border: '1px solid rgba(139,92,246,0.15)',
+            borderRadius: '8px', fontSize: '12px', lineHeight: 1.5, color: '#c4b5fd',
+            display: 'flex', alignItems: 'flex-start', gap: '8px',
+          }}>
+            <span style={{ flex: 1 }}>{signal.explanation}</span>
+            {signal.explanation_stale && (
+              <button
+                className="btn btn-secondary btn-sm"
+                style={{ fontSize: '10px', padding: '1px 6px', lineHeight: 1, flexShrink: 0 }}
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  try {
+                    const res = await apiFetch(`/signals/${signal.id}/explain`, token, { method: 'POST' });
+                    signal.explanation = res.explanation;
+                    signal.explanation_stale = false;
+                    setAnalyzeSignal(s => s ? { ...s, explanation: res.explanation, explanation_stale: false } : s);
+                  } catch (err) { /* silent */ }
+                }}
+                title="Regenerate explanation with current whale score"
+              >↻</button>
+            )}
+          </div>
+        )}
+
         <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
           {signal.status !== 'executed' && (
             <button
@@ -247,7 +275,7 @@ function SignalStats({ token }) {
           }}>
             Performance by Whale Tier
           </div>
-          {(['high', 'medium', 'low'] as const).map((tier) => {
+          {(['high', 'medium', 'low']).map((tier) => {
             const tierData = stats.performance_by_tier[tier];
             if (!tierData) return null;
             const tierExecPct = (tierData.execution_rate * 100).toFixed(1);
@@ -411,6 +439,7 @@ function SignalHistory({ token, currency }) {
                     <th style={{ padding: '6px 8px', fontWeight: 500 }}>Status</th>
                     <th style={{ padding: '6px 8px', fontWeight: 500 }}>Time to Close</th>
                     <th style={{ padding: '6px 8px', fontWeight: 500 }}>Closed</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 500 }}>Explanation</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -445,6 +474,12 @@ function SignalHistory({ token, currency }) {
                       </td>
                       <td style={{ padding: '6px 8px', color: '#8b8f98' }}>{fmtDuration(s.time_to_close_seconds)}</td>
                       <td style={{ padding: '6px 8px', color: '#6b7280', fontSize: '0.7rem' }}>{timeAgo(s.closed_at)}</td>
+                      <td style={{
+                        padding: '6px 8px', color: '#8b8f98', fontSize: '0.7rem',
+                        maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }} title={s.explanation || ''}>
+                        {s.explanation ? (s.explanation.length > 50 ? s.explanation.slice(0, 50) + '…' : s.explanation) : '—'}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
