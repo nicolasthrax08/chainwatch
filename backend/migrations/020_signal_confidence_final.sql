@@ -1,4 +1,4 @@
--- Migration 019: Add confidence_final column to copy_trade_signals
+-- Migration 020: Add confidence_final column to copy_trade_signals
 --
 -- The signal_generator computes C_final = 0.5*C_tx + 0.5*whale_score at signal
 -- creation time, but only stores confidence_score (C_tx) in the DB. The history
