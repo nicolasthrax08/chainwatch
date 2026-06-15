@@ -295,10 +295,92 @@ async def lifespan(app: FastAPI):
         start_monitor(db_pool)
         _log_startup_event("monitor_started", f"poll_interval=60s")
 
+    # ── Launch background DB auto-reconnect task ──
+    # If the DB pool failed at startup (e.g., DNS not yet ready), this task
+    # periodically retries the connection so the app self-heals without a
+    # full redeploy.  Runs every 60 s; stops on shutdown via cancel event.
+    _db_reconnect_cancel = asyncio.Event()
+
+    async def _db_reconnect_loop() -> None:
+        """Background task: retry DB pool creation until successful or cancelled."""
+        import socket as _socket_mod
+        from urllib.parse import urlparse as _urlparse_mod
+        global db_pool
+        _retry_interval = 60  # seconds between reconnect attempts
+        while not _db_reconnect_cancel.is_set():
+            if db_pool is not None:
+                # DB is connected — exit the reconnect loop
+                logger.info("DB auto-reconnect: pool is healthy, stopping retry loop")
+                break
+            logger.info("DB auto-reconnect: attempting to create pool...")
+            _log_startup_event("db_reconnect_attempt")
+            # Parse hostname for DNS pre-resolution
+            _db_host = None
+            try:
+                _parsed = _urlparse_mod(DATABASE_URL)
+                _db_host = _parsed.hostname
+            except Exception:
+                pass
+            if _db_host:
+                try:
+                    _socket_mod.getaddrinfo(_db_host, None)
+                except Exception as _dns_err:
+                    logger.info("DB auto-reconnect: DNS not ready yet: %s", _dns_err)
+                    try:
+                        await asyncio.wait_for(_db_reconnect_cancel.wait(), timeout=_retry_interval)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+            try:
+                _new_pool = await asyncpg.create_pool(
+                    DATABASE_URL,
+                    min_size=2,
+                    max_size=10,
+                    command_timeout=30,
+                    server_settings={"application_name": "chainwatch"},
+                )
+                # Verify the pool works
+                async with _new_pool.acquire() as _test_conn:
+                    await _test_conn.fetchval("SELECT 1")
+                db_pool = _new_pool
+                from services.instrumented_pool import instrument_pool
+                instrument_pool(db_pool)
+                _log_startup_event("db_reconnect_success")
+                logger.info("DB auto-reconnect: pool created successfully")
+                # Start the monitor if it isn't running
+                from services.monitor import is_monitor_alive, start_monitor
+                if not is_monitor_alive():
+                    start_monitor(db_pool)
+                    _log_startup_event("monitor_started_after_reconnect")
+                    logger.info("DB auto-reconnect: monitor started after reconnect")
+                break
+            except Exception as _pool_err:
+                logger.warning("DB auto-reconnect: attempt failed: %s", _pool_err)
+                _log_startup_event("db_reconnect_failed", str(_pool_err))
+            # Wait before retrying (with early exit on cancel)
+            try:
+                await asyncio.wait_for(_db_reconnect_cancel.wait(), timeout=_retry_interval)
+            except asyncio.TimeoutError:
+                pass
+
+    # Only start the reconnect loop if DB is not connected
+    if db_pool is None:
+        _db_reconnect_task = asyncio.create_task(_db_reconnect_loop())
+        _log_startup_event("db_reconnect_loop_started")
+        logger.info("DB auto-reconnect: background retry loop started (interval=60s)")
+
     # ── Yield control to FastAPI (application is now serving requests) ──
     yield
 
     # ── Shutdown: clean up resources in reverse order ──
+    # Signal the DB reconnect loop to stop
+    try:
+        _db_reconnect_cancel.set()
+        _rc_task = locals().get('_db_reconnect_task')
+        if _rc_task is not None and not _rc_task.done():
+            await asyncio.wait_for(_rc_task, timeout=5)
+    except Exception:
+        pass
     # Gracefully close all WebSocket connections
     try:
         from services.websocket_manager import websocket_manager
@@ -954,6 +1036,19 @@ async def get_dashboard(user: dict = Depends(get_current_user)):
         balance_hkd = round(balance_usd * _usd_hkd, 2)
         balance_btc = round(balance_usd * _usd_btc, 8)
 
+        # Determine balance source for frontend indicator
+        # 'live' = monitor has fresh data (<5 min), 'stale' = monitor data is old,
+        # 'estimated' = tx-flow fallback (no monitor data yet)
+        _lbu = w.get("last_balance_update")
+        if _db_balance is not None:
+            if _lbu is not None:
+                _age_min = (datetime.now(timezone.utc) - _lbu).total_seconds() / 60.0
+                balance_source = "live" if _age_min < 5 else "stale"
+            else:
+                balance_source = "stale"
+        else:
+            balance_source = "estimated"
+
         wallet_meta.append({
             "id": str(w["id"]),
             "address": w["address"],
@@ -967,7 +1062,8 @@ async def get_dashboard(user: dict = Depends(get_current_user)):
             "balance_usd": round(balance_usd, 2),
             "balance_hkd": balance_hkd,
             "balance_btc": balance_btc,
-            "last_balance_update": w["last_balance_update"].isoformat() if w.get("last_balance_update") else None,
+            "balance_source": balance_source,
+            "last_balance_update": _lbu.isoformat() if _lbu else None,
             "created_at": w["created_at"].isoformat(),
             "whale_score": float(w.get("whale_score") or 0),
         })
@@ -1063,6 +1159,7 @@ async def list_wallets(user: dict = Depends(get_current_user)):
                 "balance_hkd": float(w["balance_hkd"]) if w.get("balance_hkd") is not None else None,
                 "balance_btc": float(w["balance_btc"]) if w.get("balance_btc") is not None else None,
                 "whale_score": float(w.get("whale_score") or 0),
+                "balance_source": "live" if w.get("balance_usd") is not None and w.get("last_balance_update") else ("estimated" if w.get("balance_usd") is None else "stale"),
                 "last_balance_update": w["last_balance_update"].isoformat() if w.get("last_balance_update") else None,
                 "created_at": w["created_at"].isoformat()
             }
@@ -1107,6 +1204,7 @@ async def add_wallet(
             "balance_usd": float(wallet["balance_usd"]) if wallet.get("balance_usd") is not None else None,
             "balance_hkd": float(wallet["balance_hkd"]) if wallet.get("balance_hkd") is not None else None,
             "balance_btc": float(wallet["balance_btc"]) if wallet.get("balance_btc") is not None else None,
+            "balance_source": "estimated",
             "last_balance_update": (
                 wallet["last_balance_update"].isoformat()
                 if wallet.get("last_balance_update")
@@ -1169,6 +1267,7 @@ async def update_wallet(
             "balance_usd": float(updated["balance_usd"]) if updated.get("balance_usd") is not None else None,
             "balance_hkd": float(updated["balance_hkd"]) if updated.get("balance_hkd") is not None else None,
             "balance_btc": float(updated["balance_btc"]) if updated.get("balance_btc") is not None else None,
+            "balance_source": "live" if updated.get("balance_usd") is not None and updated.get("last_balance_update") else ("estimated" if updated.get("balance_usd") is None else "stale"),
             "last_balance_update": (
                 updated["last_balance_update"].isoformat()
                 if updated.get("last_balance_update")
@@ -1485,6 +1584,7 @@ async def list_alerts(user: dict = Depends(get_current_user)):
                 "enabled": a["enabled"],
                 "created_at": a["created_at"].isoformat(),
                 "last_fired": a["last_fired"].isoformat() if a["last_fired"] else None,
+                "notify_telegram": a.get("notify_telegram", True),
             }
             for a in alerts
         ]
@@ -2409,6 +2509,76 @@ async def _require_cron_secret(authorization: str = Header("")):
         raise HTTPException(status_code=403, detail="Invalid cron secret")
 
 
+# ─── DB Reconnect Endpoint ─────────────────────────────────────────────
+
+
+@app.post("/api/health/reconnect", dependencies=[Depends(_require_cron_secret)])
+async def trigger_db_reconnect():
+    """
+    Manually trigger a DB reconnection attempt.
+    Useful when the auto-reconnect loop is waiting and an operator wants
+    to force an immediate retry (e.g., after fixing DNS or DB config).
+
+    Requires CRON_SECRET header (Bearer token) for authentication.
+    Returns {"status": "connected"} if already connected,
+    {"status": "reconnecting"} if a reconnect was initiated,
+    {"status": "failed", "error": "..."} if the attempt failed.
+    """
+    global db_pool
+    if db_pool is not None:
+        # Already connected — verify it's still alive
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            return {"status": "connected", "detail": "DB pool is healthy"}
+        except Exception as e:
+            # Pool exists but is broken — close it and reconnect
+            logger.warning("DB reconnect: existing pool is broken: %s", e)
+            try:
+                await db_pool.close()
+            except Exception:
+                pass
+            db_pool = None
+
+    # Attempt immediate reconnection
+    import socket as _socket_mod
+    from urllib.parse import urlparse as _urlparse_mod
+    _db_host = None
+    try:
+        _parsed = _urlparse_mod(DATABASE_URL)
+        _db_host = _parsed.hostname
+    except Exception:
+        pass
+    if _db_host:
+        try:
+            _socket_mod.getaddrinfo(_db_host, None)
+        except Exception as _dns_err:
+            return {"status": "failed", "error": f"DNS resolution failed for {_db_host}: {_dns_err}"}
+    try:
+        _new_pool = await asyncpg.create_pool(
+            DATABASE_URL,
+            min_size=2,
+            max_size=10,
+            command_timeout=30,
+            server_settings={"application_name": "chainwatch"},
+        )
+        async with _new_pool.acquire() as _test_conn:
+            await _test_conn.fetchval("SELECT 1")
+        db_pool = _new_pool
+        from services.instrumented_pool import instrument_pool
+        instrument_pool(db_pool)
+        _log_startup_event("db_reconnect_success", "manual trigger")
+        # Start the monitor if it isn't running
+        from services.monitor import is_monitor_alive, start_monitor
+        if not is_monitor_alive():
+            start_monitor(db_pool)
+            _log_startup_event("monitor_started_after_reconnect", "manual trigger")
+        return {"status": "connected", "detail": "DB reconnected successfully"}
+    except Exception as _pool_err:
+        _log_startup_event("db_reconnect_failed", f"manual trigger: {_pool_err}")
+        return {"status": "failed", "error": str(_pool_err)}
+
+
 # ─── Task Queue Endpoints (for Hermes cron job) ─────────────────────
 
 @app.get("/api/task-queue/next", dependencies=[Depends(_require_cron_secret)])
@@ -2715,6 +2885,17 @@ async def health_diagnostic():
     # ── 2. DB connectivity test (with timeout) ──
     db_reachable = False
     db_error = None
+    if "db_url" not in report["checks"]:
+        # DATABASE_URL not configured at all
+        report["checks"]["db_url"] = {
+            "configured": False,
+            "host": None,
+            "port": None,
+            "database": None,
+            "resolved_ip": None,
+            "reachable": False,
+            "error": "DATABASE_URL not set",
+        }
     if db_pool is not None:
         try:
             t0 = _time.monotonic()
@@ -2726,6 +2907,17 @@ async def health_diagnostic():
             db_error = str(e)
     else:
         db_error = "db_pool is None — startup handler failed to create pool"
+        # Report reconnect loop status
+        try:
+            _rc_cancel = locals().get('_db_reconnect_cancel') or globals().get('_db_reconnect_cancel')
+            _rc_task = locals().get('_db_reconnect_task') or globals().get('_db_reconnect_task')
+            if _rc_cancel is not None:
+                report["checks"]["db_url"]["reconnect_loop"] = {
+                    "active": not _rc_cancel.is_set(),
+                    "task_done": _rc_task.done() if _rc_task is not None else None,
+                }
+        except Exception:
+            pass
     report["checks"]["db_url"]["reachable"] = db_reachable
     if db_error:
         report["checks"]["db_url"]["error"] = db_error
