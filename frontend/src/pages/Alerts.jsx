@@ -1,30 +1,5 @@
 import React, { useState, useEffect } from 'react';
-
-import { API_BASE } from '../config';
-
-async function apiFetch(path, token, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-      ...options.headers,
-    },
-  });
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
-  return res.json();
-}
-
-function timeAgo(timestamp) {
-  if (!timestamp) return '—';
-  const diffMs = Date.now() - new Date(timestamp).getTime();
-  if (diffMs <= 0) return 'just now';
-  const seconds = Math.floor(diffMs / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return `${Math.floor(seconds / 86400)}d ago`;
-}
+import { apiFetch, timeAgo } from '../api';
 
 const PRESET_ALERTS = [
   { rule_type: 'large_transaction', label: 'Large Transaction', description: 'Any txn > $X', default_threshold: 10000 },
@@ -41,6 +16,7 @@ function Alerts({ token, currency }) {
     rule_type: '',
     threshold: 0,
     enabled: true,
+    notify_telegram: true,
   });
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(true);
@@ -96,6 +72,7 @@ function Alerts({ token, currency }) {
       rule_type: preset.rule_type,
       threshold: preset.default_threshold,
       enabled: true,
+      notify_telegram: true,
     });
     setShowAdd(true);
   };
@@ -108,7 +85,7 @@ function Alerts({ token, currency }) {
         body: JSON.stringify(form),
       });
       setShowAdd(false);
-      setForm({ rule_type: '', threshold: 0, enabled: true });
+      setForm({ rule_type: '', threshold: 0, enabled: true, notify_telegram: true });
       load();
     } catch (e) {
       alert(e.message);
@@ -225,6 +202,14 @@ function Alerts({ token, currency }) {
               />
               <span style={{ fontSize: '0.85rem' }}>Enabled</span>
             </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={form.notify_telegram}
+                onChange={e => setForm({ ...form, notify_telegram: e.target.checked })}
+              />
+              <span style={{ fontSize: '0.85rem' }}>📱 Notify via Telegram</span>
+            </label>
             <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
               <button type="button" className="btn btn-secondary" onClick={() => setShowAdd(false)}>
                 Cancel
@@ -251,6 +236,7 @@ function Alerts({ token, currency }) {
                   <th>Threshold</th>
                   <th>Last Fired</th>
                   <th>Status</th>
+                  <th>Telegram</th>
                   <th>Created</th>
                   <th>Actions</th>
                 </tr>
@@ -278,10 +264,17 @@ function Alerts({ token, currency }) {
                           type="checkbox"
                           checked={a.enabled}
                           onChange={() => handleToggle(a)}
-                          disabled={togglingIds.has(alert.id)}  // Finding: disable during toggle API call
+                          disabled={togglingIds.has(a.id)}  // Finding: disable during toggle API call
                         />
                         <span className="toggle-slider" />
                       </label>
+                    </td>
+                    <td>
+                      {a.notify_telegram ? (
+                        <span style={{ color: '#10b981', fontSize: '0.85rem' }}>📱 On</span>
+                      ) : (
+                        <span style={{ color: '#6b7280', fontSize: '0.85rem' }}>—</span>
+                      )}
                     </td>
                     <td className="time-ago">{new Date(a.created_at).toLocaleDateString()}</td>
                     <td>
