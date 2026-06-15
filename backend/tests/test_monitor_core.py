@@ -1051,6 +1051,34 @@ class TestConfigConstants(unittest.TestCase):
         for coin in ["USDC", "USDT", "DAI", "BUSD", "FDUSD", "PYUSD"]:
             self.assertIn(coin, monitor._STABLECOINS)
 
+    def test_get_phase_timings_before_poll_cycle(self):
+        """get_phase_timings() must not raise NameError before any poll cycle.
+
+        Regression test for CRIT-1 (2026-06-15): _phase_durations was referenced
+        at module level in get_phase_timings() but never initialized at module level,
+        causing NameError on the /api/health/metrics endpoint.
+        """
+        # Reset to pre-poll state
+        monitor._phase_durations = {}
+        result = monitor.get_phase_timings()
+        self.assertEqual(result["phase_durations_s"], {})
+        self.assertEqual(result["phase_count"], 0)
+        self.assertEqual(result["slow_phases"], {})
+        self.assertIsInstance(result["last_cycle_s"], float)
+
+    def test_get_phase_timings_after_poll_cycle(self):
+        """get_phase_timings() should return populated phases after a cycle."""
+        monitor._phase_durations = {
+            "phase1_read_wallets": 0.12,
+            "phase2_prune_state": 0.01,
+            "phase3_fetch_wallets": 5.5,  # exceeds warn threshold
+            "phase4_collect_changes": 0.03,
+        }
+        result = monitor.get_phase_timings()
+        self.assertEqual(result["phase_count"], 4)
+        self.assertIn("phase3_fetch_wallets", result["slow_phases"])
+        self.assertNotIn("phase1_read_wallets", result["slow_phases"])
+
 
 if __name__ == "__main__":
     unittest.main()

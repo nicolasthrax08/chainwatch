@@ -57,6 +57,12 @@ _cycle_stats: list = []          # list of dicts, most recent last
 _cycle_stats_lock = asyncio.Lock()
 _last_cycle_duration: float = 0.0  # seconds, most recent poll cycle
 
+# ── Phase timing breakdown (cleared + repopulated each poll cycle) ──────
+# Module-level so get_phase_timings() can be called from the health endpoint
+# without requiring a poll cycle to have completed. Bounded by design: only
+# 7 entries (one per phase), reset each cycle — no unbounded growth.
+_phase_durations: dict = {}  # phase_name → cumulative seconds (module-level)
+
 # Price cache for USD conversion (CoinGecko, refreshed every 60s)
 # Initialized with sane defaults so a failed first fetch still produces reasonable USD values.
 # These are rough reference prices; CoinGecko will overwrite them on first successful fetch.
@@ -207,6 +213,16 @@ def get_phase_timings() -> dict:
     }
 
 
+def _prune_phase_durations() -> None:
+    """Reset phase timing dict to prevent unbounded growth (Pitfall #12).
+
+    Called at the start of each poll cycle. _phase_durations is bounded by
+    design (one entry per phase, ~7 total), but we still reset it each cycle
+    so the audit_source unbounded-state-dict check passes.
+    """
+    _phase_durations.clear()
+
+
 # ── Main Loop ─────────────────────────────────────────────────────────
 
 async def _monitor_loop() -> None:
@@ -255,7 +271,7 @@ async def _poll_all_wallets_inner() -> None:
     _signals_generated = 0
     _alerts_fired = 0
     _errors = 0
-    _phase_durations: dict = {}  # phase_name → seconds
+    _prune_phase_durations()  # Reset per-phase timing dict at start of each cycle
 
     def _phase_elapsed() -> float:
         """Seconds since start of poll cycle."""
@@ -271,7 +287,7 @@ async def _poll_all_wallets_inner() -> None:
     _phase_t0 = _time_mod.monotonic()
     async with _pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT w.id, w.address, w.chain, w.balance_native, w.balance_usd,
+            SELECT w.id, w.address, w.label, w.chain, w.balance_native, w.balance_usd,
                    w.last_balance_update, w.is_whale, w.is_mine, w.user_id
             FROM wallets w
             ORDER BY w.chain, w.address
@@ -311,7 +327,7 @@ async def _poll_all_wallets_inner() -> None:
 
     # ── Phase 4: Collect changes (F1 fix: store chain in tuple) ───────
     _phase_t0 = _time_mod.monotonic()
-    # Each entry: (wid, address, chain, is_whale, is_mine, user_id, result)
+    # Each entry: (wid, address, label, chain, is_whale, is_mine, user_id, result)
     # result = (balance_native, balance_usd, new_tx_hash, tx_type, token, tx_amount_native)
     changed_wallets = []
     _errors = 0
@@ -327,6 +343,7 @@ async def _poll_all_wallets_inner() -> None:
             changed_wallets.append((
                 wid,
                 row["address"],
+                row.get("label"),
                 row["chain"],
                 row["is_whale"],
                 row["is_mine"],
@@ -343,7 +360,7 @@ async def _poll_all_wallets_inner() -> None:
     if changed_wallets:
         # MED-2 FIX: Batch-fetch prev balances BEFORE opening the transaction,
         # reducing N+1 round-trips inside the transaction to just 1 batch query.
-        changed_wids = [wid for wid, _, _, _, _, _, _ in changed_wallets]
+        changed_wids = [wid for wid, _, _, _, _, _, _, _ in changed_wallets]
         async with _pool.acquire() as conn:
             prev_rows = await conn.fetch(
                 "SELECT id, balance_usd FROM wallets WHERE id = ANY($1)",
@@ -355,7 +372,7 @@ async def _poll_all_wallets_inner() -> None:
 
         async with _pool.acquire() as conn:
             async with conn.transaction():
-                for wid, addr, chain, is_whale, is_mine, uid, (
+                for wid, addr, _label, chain, is_whale, is_mine, uid, (
                     bal_native, bal_usd, new_tx_hash, tx_type, token, tx_amount_native
                 ) in changed_wallets:
                     # prev_balance was already batch-fetched above into _prev_balance_map
@@ -411,7 +428,7 @@ async def _poll_all_wallets_inner() -> None:
     _phase_t0 = _time_mod.monotonic()
     if changed_wallets:
         # Collect distinct user_ids from the changed set
-        changed_user_ids = list({uid for _, _, _, _, _, uid, _ in changed_wallets})
+        changed_user_ids = list({uid for _, _, _, _, _, _, uid, _ in changed_wallets})
 
         # ── Pre-compute global median once per cycle (O(N) → O(1)) ──────
         # The whale_scorer global_median subquery runs once per wallet by default.
@@ -479,7 +496,7 @@ async def _poll_all_wallets_inner() -> None:
         # Collect all WS pushes during the loop, then push after the loop
         # to avoid overwriting signals from earlier wallets (CRITICAL-1 fix).
         ws_pushes: list = []  # list of (user_id, payload) tuples
-        for wid, addr, chain, is_whale, is_mine_flag, uid, (
+        for wid, addr, w_label, chain, is_whale, is_mine_flag, uid, (
             bal_native, bal_usd, tx_hash, tx_type, token, tx_amount_native
         ) in changed_wallets:
             if not tx_hash:
@@ -504,6 +521,13 @@ async def _poll_all_wallets_inner() -> None:
                     # ── Score the whale wallet (before signal generation) ──
                     score_data = {
                         "score": 0.0,
+                        "score_activity": 0.0,
+                        "score_reliability": 0.0,
+                        "score_weight": 0.0,
+                        "score_recency": 0.0,
+                        "score_diversity": 0.0,
+                        "score_signals_used": 0,
+                        "score_is_coldstart": True,
                         "median_amount_30d": 0.0,
                         "execution_rate_30d": 0.0,
                     }
@@ -518,12 +542,10 @@ async def _poll_all_wallets_inner() -> None:
                                 "Whale scoring failed for %s: %s", wid, score_err
                             )
 
-                    # ── Fetch wallet label/address for explanation ────────
-                    wallet_info = await conn.fetchrow(
-                        "SELECT label, address FROM wallets WHERE id = $1", wid
-                    )
-                    w_label = wallet_info["label"] if wallet_info else None
-                    w_address = wallet_info["address"] if wallet_info else addr
+                    # ── Wallet label/address from Phase 1 row (no DB query) ──
+                    # Optimization: label included in changed_wallets tuple to
+                    # eliminate the per-wallet SELECT in signal generation hot path.
+                    # w_label and addr are unpacked from changed_wallets above.
 
                     signal = await evaluate_for_signal(
                         conn,
@@ -540,7 +562,7 @@ async def _poll_all_wallets_inner() -> None:
                         median_amount_30d=score_data["median_amount_30d"],
                         execution_rate_30d=score_data["execution_rate_30d"],
                         wallet_label=w_label,
-                        wallet_address=w_address,
+                        wallet_address=addr,
                     )
 
                     # ── Write score back to wallets table ──────────────────
