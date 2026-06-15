@@ -961,7 +961,7 @@ class TestPipelineIntegration(unittest.TestCase):
 
     def test_explanation_new_whale_buy_high_conf(self):
         """
-        GIVEN: new whale (score<0.5), buy, high confidence.
+        GIVEN: new whale (score < MIN_WHALE_SCORE), buy, high confidence.
         WHEN: generate_explanation is called.
         THEN: Uses TPL-H template mentioning "New whale" and "watch closely".
         """
@@ -971,7 +971,7 @@ class TestPipelineIntegration(unittest.TestCase):
                 "wallet_label": "Fresh Alpha", "wallet_address": "0xFRESH",
                 "is_receive": False, "confidence_score": 0.90, "confidence_final": 0.85,
             },
-            whale_score=0.40,
+            whale_score=0.29,  # < MIN_WHALE_SCORE (0.30) → new
             median_amount_30d=0,
         )
         self.assertIn("New whale", explanation)

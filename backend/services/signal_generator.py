@@ -104,7 +104,12 @@ def generate_explanation(
     label = _resolve_label(wallet_label_raw, wallet_address)
     amount_formatted = _fmt_amount(amount_usd)
 
-    is_new = whale_score < 0.5
+    # Use MIN_WHALE_SCORE threshold to align with signal generation logic.
+    # A wallet with whale_score >= MIN_WHALE_SCORE (0.30) is "proven" — it has
+    # passed the signal threshold and has meaningful on-chain history.
+    # Previously this used a hardcoded 0.5, causing wallets with score 0.30-0.49
+    # to be mislabeled as "new whale" in the explanation.
+    is_new = whale_score < MIN_WHALE_SCORE
     is_proven = not is_new
 
     # Determine if trade is "large" relative to wallet's typical trade size

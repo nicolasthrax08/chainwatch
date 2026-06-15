@@ -776,11 +776,11 @@ class TestGenerateExplanation(unittest.TestCase):
         base.update(overrides)
         return base
 
-    # TPL-A: receive + new whale
+    # TPL-A: receive + new whale (whale_score < MIN_WHALE_SCORE)
     def test_tpl_a_receive_new_whale(self):
         result = sg.generate_explanation(
             self._signal_data(action="receive", is_receive=True),
-            whale_score=0.3,
+            whale_score=0.29,  # < MIN_WHALE_SCORE (0.30) → new
             median_amount_30d=10000.0,
         )
         self.assertIn("received", result)
@@ -848,11 +848,11 @@ class TestGenerateExplanation(unittest.TestCase):
         self.assertIn("bought", result)
         self.assertIn("moderate confidence", result)
 
-    # TPL-H: buy + new + high
+    # TPL-H: buy + new + high (whale_score < MIN_WHALE_SCORE)
     def test_tpl_h_buy_new_high(self):
         result = sg.generate_explanation(
             self._signal_data(action="buy", confidence_final=0.8),
-            whale_score=0.3,
+            whale_score=0.29,  # < MIN_WHALE_SCORE (0.30) → new
             median_amount_30d=10000.0,
         )
         self.assertIn("New whale", result)
@@ -862,7 +862,7 @@ class TestGenerateExplanation(unittest.TestCase):
     def test_tpl_i_buy_new_med(self):
         result = sg.generate_explanation(
             self._signal_data(action="buy", confidence_final=0.6),
-            whale_score=0.3,
+            whale_score=0.29,  # < MIN_WHALE_SCORE (0.30) → new
             median_amount_30d=10000.0,
         )
         self.assertIn("New whale", result)
@@ -872,7 +872,7 @@ class TestGenerateExplanation(unittest.TestCase):
     def test_tpl_j_buy_new_low_small(self):
         result = sg.generate_explanation(
             self._signal_data(action="buy", confidence_final=0.4, amount_usd=1000.0),
-            whale_score=0.3,
+            whale_score=0.29,  # < MIN_WHALE_SCORE (0.30) → new
             median_amount_30d=10000.0,  # 0.1x → small
         )
         self.assertIn("New whale", result)
@@ -882,8 +882,8 @@ class TestGenerateExplanation(unittest.TestCase):
     def test_tpl_k_buy_new_low_med(self):
         result = sg.generate_explanation(
             self._signal_data(action="buy", confidence_final=0.4, amount_usd=10000.0),
-            whale_score=0.3,
-            median_amount_30d=10000.0,  # 1x → med
+            whale_score=0.29,  # < MIN_WHALE_SCORE (0.30) → new
+            median_amount_30d=10000.0,
         )
         self.assertIn("New whale", result)
         self.assertIn("treat cautiously", result)
@@ -993,11 +993,22 @@ class TestGenerateExplanation(unittest.TestCase):
         # TPL-B: receive + proven + large
         self.assertIn("consistent whale", result)
 
-    def test_whale_score_just_below_0_5(self):
-        """whale_score=0.49 should be 'new'."""
+    def test_whale_score_at_min_threshold(self):
+        """whale_score=0.30 (== MIN_WHALE_SCORE) should be 'proven', not 'new'."""
         result = sg.generate_explanation(
             self._signal_data(action="receive", is_receive=True, amount_usd=50000.0),
-            whale_score=0.49,
+            whale_score=0.30,  # == MIN_WHALE_SCORE → proven (not strictly less than)
+            median_amount_30d=10000.0,
+        )
+        # TPL-B: receive + proven + large (not TPL-A "first signal")
+        self.assertIn("consistent whale", result)
+        self.assertNotIn("first signal", result)
+
+    def test_whale_score_just_below_min(self):
+        """whale_score=0.29 should be 'new' (below MIN_WHALE_SCORE)."""
+        result = sg.generate_explanation(
+            self._signal_data(action="receive", is_receive=True, amount_usd=50000.0),
+            whale_score=0.29,  # < MIN_WHALE_SCORE (0.30) → new
             median_amount_30d=10000.0,
         )
         # TPL-A: receive + new whale
