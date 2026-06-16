@@ -15,6 +15,7 @@ Exit codes:
 """
 import argparse
 import ast
+import json
 import os
 import re
 import sys
@@ -3986,6 +3987,7 @@ def run_audit(base_path: str) -> AuditResult:
     check_no_duplicate_confidence_badge(jsx_files, result)
     check_no_duplicate_status_colors(jsx_files, result)
     check_no_duplicate_fmt_duration(jsx_files, result)
+    check_frontend_test_infrastructure(jsx_files, py_files, result)
     check_jose_not_imported_in_tests(py_files, result)
     check_no_duplicate_migration_ids(sql_files, result)
     check_websocket_load_tests(py_files, result)
@@ -4629,6 +4631,98 @@ def check_no_duplicate_status_colors(jsx_files: list, result: AuditResult):
         result.add_pass(
             "STATUS_COLORS is not duplicated — all page files import from api.js"
         )
+
+
+def check_frontend_test_infrastructure(jsx_files: list, py_files: list, result: AuditResult):
+    """Audit check: frontend test infrastructure should exist.
+
+    A production React app needs:
+    1. A test runner (vitest) configured in package.json
+    2. At least one test file for shared utility functions (api.js)
+    3. At least one test file for a React component
+    """
+    # Check 1: vitest is in devDependencies
+    # (py_files parameter kept for API consistency with other check functions)
+    has_vitest = False
+    has_test_script = False
+    frontend_pkg = None
+    for fpath in jsx_files:
+        parent = os.path.dirname(fpath)
+        candidate = os.path.join(parent, '..', 'package.json')
+        if os.path.exists(candidate):
+            frontend_pkg = candidate
+            break
+
+    if not frontend_pkg:
+        # Try one more level up
+        for fpath in jsx_files:
+            parent = os.path.dirname(fpath)
+            grandparent = os.path.dirname(parent)
+            candidate = os.path.join(grandparent, 'package.json')
+            if os.path.exists(candidate):
+                frontend_pkg = candidate
+                break
+
+    if frontend_pkg:
+        try:
+            pkg = json.loads(read_file(frontend_pkg))
+            dev_deps = pkg.get('devDependencies', {})
+            scripts = pkg.get('scripts', {})
+            if 'vitest' in dev_deps:
+                has_vitest = True
+            if 'test' in scripts and 'vitest' in scripts['test']:
+                has_test_script = True
+        except Exception:
+            pass
+
+    if has_vitest and has_test_script:
+        result.add_pass("frontend: vitest test runner is configured in package.json")
+    else:
+        missing = []
+        if not has_vitest:
+            missing.append("vitest in devDependencies")
+        if not has_test_script:
+            missing.append("\"test\": \"vitest run\" script")
+        result.add(Finding(
+            pitfall="frontend-test-infrastructure",
+            severity="minor",
+            file="frontend/package.json",
+            line=0,
+            description=f"Frontend test infrastructure incomplete: missing {', '.join(missing)}",
+            suggestion="Run: cd frontend && npm install --save-dev vitest @testing-library/react @testing-library/jest-dom jsdom",
+        ))
+
+    # Check 2: test files exist for api.js utilities
+    test_files = [f for f in jsx_files if 'tests/' in f and f.endswith(('.test.js', '.test.jsx'))]
+    has_api_tests = any('api.test' in f for f in test_files)
+    has_component_tests = any(
+        any(name in f for name in ['ConfidenceBadge', 'BalanceSourceIndicator', 'ChainBadge'])
+        for f in test_files
+    )
+
+    if has_api_tests:
+        result.add_pass("frontend: api.js utility tests exist")
+    else:
+        result.add(Finding(
+            pitfall="frontend-test-infrastructure",
+            severity="minor",
+            file="frontend/src/tests/",
+            line=0,
+            description="No test file for api.js utility functions (timeAgo, fmtTotal, fmtBalance, etc.)",
+            suggestion="Create frontend/src/tests/api.test.js with tests for all exported utility functions",
+        ))
+
+    if has_component_tests:
+        result.add_pass("frontend: component tests exist")
+    else:
+        result.add(Finding(
+            pitfall="frontend-test-infrastructure",
+            severity="minor",
+            file="frontend/src/tests/",
+            line=0,
+            description="No component test files (ConfidenceBadge, BalanceSourceIndicator, etc.)",
+            suggestion="Create frontend/src/tests/ConfidenceBadge.test.jsx with rendering and behavior tests",
+        ))
 
 
 def check_no_duplicate_fmt_duration(jsx_files: list, result: AuditResult):

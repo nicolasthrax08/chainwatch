@@ -133,3 +133,45 @@ export const STATUS_COLORS = {
   failed: '#ef4444',
   stale: '#6b7280',
 };
+
+/**
+ * Check backend API health without authentication.
+ * Calls /api/health and returns a simplified health status.
+ *
+ * @returns {Promise<{ok: boolean, status: string, dbOk: boolean}>}
+ *   - ok: true if the service is fully healthy
+ *   - status: 'healthy' | 'degraded' | 'unreachable'
+ *   - dbOk: true if the database is connected
+ *
+ * Never throws — returns { ok: false, status: 'unreachable', dbOk: false }
+ * on any error (network failure, timeout, etc.).
+ */
+export async function checkApiHealth() {
+  try {
+    const res = await fetch(`${typeof API_BASE !== 'undefined' ? API_BASE : '/api'}/health`, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      // Short timeout — we want fast feedback, not a long wait
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      // Got a response but it's an error status (e.g., 503)
+      let body = {};
+      try { body = await res.json(); } catch { /* ignore */ }
+      return {
+        ok: false,
+        status: body.status || 'degraded',
+        dbOk: body.db?.ok ?? false,
+      };
+    }
+    const body = await res.json();
+    return {
+      ok: body.status === 'healthy',
+      status: body.status || 'healthy',
+      dbOk: body.db?.ok ?? false,
+    };
+  } catch {
+    // Network error, timeout, DNS failure, etc.
+    return { ok: false, status: 'unreachable', dbOk: false };
+  }
+}

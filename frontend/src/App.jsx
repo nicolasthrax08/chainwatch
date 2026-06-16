@@ -7,6 +7,7 @@ import CopyTrades from './pages/CopyTrades';
 import Settings from './pages/Settings';
 import Login from './pages/Login';
 import { API_BASE } from './config';
+import { HealthBanner } from './components/HealthBanner';
 import './App.css';
 
 const NAV_ITEMS = [
@@ -295,6 +296,7 @@ function App() {
 
   return (
     <div className="app-layout">
+      <HealthBanner />
       {/* Sidebar */}
       <nav className={`sidebar ${sidebarOpen ? 'open' : 'closed'}`}>
         <div className="sidebar-header">
