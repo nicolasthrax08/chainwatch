@@ -1,72 +1,10 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-
-import { API_BASE } from '../config';
 import { ChainBadge } from '../App';
 import { ConfidenceBadge } from '../components/ConfidenceBadge';
-
-async function apiFetch(path, token, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-      ...options.headers,
-    },
-  });
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
-  return res.json();
-}
-
-function timeAgo(timestamp) {
-  if (!timestamp) return '—';
-  const diffMs = Date.now() - new Date(timestamp).getTime();
-  // Clamp negative (future timestamps from clock skew) to 0
-  if (diffMs <= 0) return 'just now';
-  const seconds = Math.floor(diffMs / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return `${Math.floor(seconds / 86400)}d ago`;
-}
-
-function truncateAddress(addr) {
-  if (!addr) return '—';
-  return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
-}
-
-/**
- * Check if a wallet balance was updated recently (within last 2 minutes).
- * Used to show a "live" indicator on the dashboard.
- */
-function isLiveUpdate(timestamp) {
-  if (!timestamp) return false;
-  const diffMs = Date.now() - new Date(timestamp).getTime();
-  return diffMs >= 0 && diffMs < 120000; // within 2 minutes
-}
-
-/**
- * Format a balance in the selected currency.
- */
-function fmtBalance(wallet, currency) {
-  let value;
-  if (currency === 'HKD') value = wallet.balance_hkd;
-  else if (currency === 'BTC') value = wallet.balance_btc;
-  else value = wallet.balance_usd;
-
-  if (value == null) return '—';  // null/undefined → no data; 0 is a valid balance
-
-  if (currency === 'BTC') return `₿${value.toFixed(8)}`;
-  if (currency === 'HKD') return `HK$${value.toLocaleString()}`;
-  return `$${value.toLocaleString()}`;
-}
-
-function fmtTotal(total, currency) {
-  if (!total && total !== 0) return '—';
-  // F5 fix: backend already provides converted totals; render them directly
-  if (currency === 'BTC') return `₿${total.toLocaleString(undefined, { maximumFractionDigits: 8 })}`;
-  if (currency === 'HKD') return `HK$${total.toLocaleString()}`;
-  return `$${total.toLocaleString()}`;
-}
+import {
+  apiFetch, timeAgo, fmtTotal, fmtBalance, truncateAddress, fmtDuration, STATUS_COLORS,
+} from '../api';
+import { BalanceSourceIndicator } from '../components/BalanceSourceIndicator';
 
 /**
  * RiskBadge — renders a stylized badge for wallet risk profiling.
@@ -101,22 +39,6 @@ function RiskBadge({ wallet }) {
   }
 
   return null;
-}
-
-const DASHBOARD_STATUS_COLORS = {
-  pending: '#f59e0b',
-  executed: '#10b981',
-  failed: '#ef4444',
-  stale: '#6b7280',
-};
-
-function fmtDuration(seconds) {
-  if (!seconds && seconds !== 0) return '—';
-  const s = Math.round(seconds);
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
-  return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
 }
 
 /**
@@ -228,8 +150,8 @@ function DashboardSignalHistory({ token, currency }) {
                       <td style={{ padding: '6px 8px' }}>
                         <span style={{
                           fontSize: '0.7rem', fontWeight: 600, padding: '1px 5px', borderRadius: '3px',
-                          background: `${DASHBOARD_STATUS_COLORS[s.status] || '#6b7280'}22`,
-                          color: DASHBOARD_STATUS_COLORS[s.status] || '#6b7280',
+                          background: `${STATUS_COLORS[s.status] || '#6b7280'}22`,
+                          color: STATUS_COLORS[s.status] || '#6b7280',
                         }}>{s.status}</span>
                       </td>
                       <td style={{ padding: '6px 8px', color: '#8b8f98' }}>{fmtDuration(s.time_to_close_seconds)}</td>
@@ -360,7 +282,7 @@ function DashboardAnalyzeModal({ signal, currency, onMirror, onClose }) {
             {React.isValidElement(value) ? value : (
               <span style={{
                 color: label === 'Status'
-                  ? (DASHBOARD_STATUS_COLORS[signal.status] || '#8b8f98')
+                  ? (STATUS_COLORS[signal.status] || '#8b8f98')
                   : '#e2e8f0',
                 fontWeight: 400,
               }}>{value}</span>
@@ -718,21 +640,7 @@ function Dashboard({ token, currency }) {
                       <td className="address">{truncateAddress(w.address)}</td>
                       <td>
                         {fmtBalance(w, currency)}
-                        {isLiveUpdate(w.last_balance_update) && (
-                          <span
-                            title={`Updated ${timeAgo(w.last_balance_update)}`}
-                            style={{
-                              display: 'inline-block',
-                              width: '6px',
-                              height: '6px',
-                              borderRadius: '50%',
-                              backgroundColor: '#10b981',
-                              marginLeft: '6px',
-                              verticalAlign: 'middle',
-                              boxShadow: '0 0 4px rgba(16,185,129,0.6)',
-                            }}
-                          />
-                        )}
+                        <BalanceSourceIndicator wallet={w} />
                       </td>
                     </tr>
                   ))}
@@ -772,21 +680,7 @@ function Dashboard({ token, currency }) {
                       <td className="address">{truncateAddress(w.address)}</td>
                       <td>
                         {fmtBalance(w, currency)}
-                        {isLiveUpdate(w.last_balance_update) && (
-                          <span
-                            title={`Updated ${timeAgo(w.last_balance_update)}`}
-                            style={{
-                              display: 'inline-block',
-                              width: '6px',
-                              height: '6px',
-                              borderRadius: '50%',
-                              backgroundColor: '#10b981',
-                              marginLeft: '6px',
-                              verticalAlign: 'middle',
-                              boxShadow: '0 0 4px rgba(16,185,129,0.6)',
-                            }}
-                          />
-                        )}
+                        <BalanceSourceIndicator wallet={w} />
                       </td>
                       <td>
                         {w.whale_score != null && w.whale_score > 0 ? (

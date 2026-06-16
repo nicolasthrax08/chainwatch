@@ -70,8 +70,19 @@ def find_py_files(base: str) -> List[str]:
 
 def find_sql_files(base: str) -> List[str]:
     results = []
+    # Prefer backend/migrations/ as the canonical source.  If both
+    # backend/migrations/ AND a root-level migrations/ exist, only scan
+    # backend/migrations/ to avoid false duplicate-ID findings from
+    # stale shadow copies (Pitfall #17: dual-backend drift).
+    backend_migrations = os.path.join(base, "backend", "migrations")
+    root_migrations = os.path.join(base, "migrations")
+    has_backend = os.path.isdir(backend_migrations)
     for root, dirs, files in os.walk(base):
         dirs[:] = [d for d in dirs if d not in {"__pycache__", ".git"}]
+        # Skip root-level migrations/ entirely when backend/migrations/ exists
+        if has_backend and root == root_migrations:
+            dirs[:] = []  # don't recurse into stale root migrations
+            continue
         for f in files:
             if f.endswith(".sql"):
                 results.append(os.path.join(root, f))
@@ -963,13 +974,23 @@ def check_placeholder_masking(py_files: List[str], jsx_files: List[str], result:
         # Explicit null/undefined comparison: if (x == null), if (var === undefined)
         r"if\s*\(\s*\w+\s*=?=\s*(null|undefined)",
         # Compound null check: if (x == null || x == undefined), if (!x && x !== 0)
-        r"if\s*\(\s*\w+\s*(?:==|!=|<>\?)\s*(null|undefined)",
+        r"if\s*\(\s*\w+\s*(?:==|!=|<>?)\s*(null|undefined)",
         # Ternary with '—' on same line: x ? ... : '—' (allows } in template literals)
         r"\?\s*.*:\s*['\"\u2014]\s*\}?",
         # JSX expression with fallback: {x || '—'}, {obj.prop || '—'}
         r"\{\s*[\w.]+\s*\|\|\s*['\"\u2014]",
         # value == null || value == undefined (full compound)
         r"\w+\s*==\s*null\s*\|\|\s*\w+\s*==",
+        # return '—' preceded by null guard on same line: if (!x) return '—'
+        r"if\s*\([^)]+\)\s*return\s+['\"\u2014]",
+        # return '—' after null coalescing guard: if (x == null) return '—'
+        r"\}\s*;\s*['\"\u2014]",
+        # return '—' preceded by null guard on same line: if (!x) return '—'
+        r"if\s*\([^)]+\)\s*return\s+['\"\u2014]",
+        # return '—' after null coalescing guard: if (x == null) return '—'
+        r"return\s+['\"\u2014]\s*;",
+        # JSDoc/SDoc comment lines: * @returns {string} e.g. ... '—'
+        r"^\s*\*\s+",
     ]
 
     all_files = py_files + jsx_files
@@ -2975,10 +2996,12 @@ def check_mirror_trade_action_guard(py_files: List[str], result: AuditResult):
                 if "Cannot mirror trade" in line:
                     has_action_guard = True
                     break
-                if i > func_line + 60:
-                    break
                 if (line.strip().startswith("def ") or line.strip().startswith("async def ")) and i > func_line + 2:
                     break
+
+        # Skip files that don't define the mirror_trade function
+        if not in_mirror_trade:
+            continue
 
         if has_action_guard:
             result.add_pass(
@@ -3031,10 +3054,12 @@ def check_mirror_trade_response_validation(py_files: List[str], result: AuditRes
                 if "not alpaca_order_id" in line or "no order ID" in line.lower():
                     has_response_validation = True
                     break
-                if i > func_line + 80:
-                    break
                 if (line.strip().startswith("def ") or line.strip().startswith("async def ")) and i > func_line + 2:
                     break
+
+        # Skip files that don't define the mirror_trade function
+        if not in_mirror_trade:
+            continue
 
         if has_response_validation:
             result.add_pass(
@@ -3072,10 +3097,21 @@ def check_mirror_trade_price_status_check(py_files: List[str], result: AuditResu
 
         lines_list = lines(text)
         has_price_status_check = False
+        in_mirror_trade = False
         for i, line in enumerate(lines_list, 1):
-            if "price_resp.status_code" in line or "price_resp.status" in line:
-                has_price_status_check = True
-                break
+            if "async def mirror_trade" in line:
+                in_mirror_trade = True
+                continue
+            if in_mirror_trade:
+                if "price_resp.status_code" in line or "price_resp.status" in line:
+                    has_price_status_check = True
+                    break
+                if (line.strip().startswith("def ") or line.strip().startswith("async def ")) and i > 1:
+                    break
+
+        # Skip files that don't define the mirror_trade function
+        if not in_mirror_trade:
+            continue
 
         if has_price_status_check:
             result.add_pass(
@@ -3948,11 +3984,105 @@ def run_audit(base_path: str) -> AuditResult:
     check_mirror_trade_rate_limit(py_files, result)
     check_phase_timings_in_metrics(py_files, result)
     check_no_duplicate_confidence_badge(jsx_files, result)
+    check_no_duplicate_status_colors(jsx_files, result)
+    check_no_duplicate_fmt_duration(jsx_files, result)
     check_jose_not_imported_in_tests(py_files, result)
-    check_duplicate_migration_ids(sql_files, result)
+    check_no_duplicate_migration_ids(sql_files, result)
     check_websocket_load_tests(py_files, result)
+    check_db_reconnect_feature(py_files, result)
 
     return result
+
+
+def check_db_reconnect_feature(py_files: List[str], result: AuditResult):
+    """
+    Verify the DB auto-reconnect feature is properly implemented:
+    1. Background reconnect loop is started when db_pool is None at startup
+    2. Reconnect endpoint exists and requires CRON_SECRET
+    3. Reconnect loop respects cancel event on shutdown
+    4. Diagnostic endpoint reports reconnect status
+    """
+    main_path = None
+    for fpath in py_files:
+        if fpath.endswith("/main.py") and ("backend" in fpath or "chainwatch" in fpath):
+            main_path = fpath
+            break
+    # Fallback: match by basename when run from the backend/ directory itself
+    # (paths are like './main.py' which doesn't contain 'backend' or 'chainwatch')
+    if main_path is None:
+        for fpath in py_files:
+            if os.path.basename(fpath) == "main.py":
+                main_path = fpath
+                break
+
+    if main_path is None:
+        result.add(Finding(
+            pitfall="db-reconnect",
+            severity="minor",
+            file="backend/main.py",
+            line=0,
+            description="Could not find main.py to verify DB reconnect feature",
+            suggestion="Ensure check_db_reconnect_feature can locate main.py",
+        ))
+        return
+
+    try:
+        with open(main_path) as f:
+            text = f.read()
+    except Exception:
+        return
+
+    # Check 1: Background reconnect loop started when db_pool is None
+    if "_db_reconnect_loop" in text or "db_reconnect_loop" in text:
+        result.add_pass("DB auto-reconnect: background retry loop is implemented")
+    else:
+        result.add(Finding(
+            pitfall="db-reconnect",
+            severity="minor",
+            file=main_path,
+            line=0,
+            description="No _db_reconnect_loop found — app will not auto-recover from DB connection failure at startup",
+            suggestion="Add a background asyncio task that retries db_pool.create_pool() on startup failure",
+        ))
+
+    # Check 2: Reconnect endpoint with CRON_SECRET auth
+    if "/api/health/reconnect" in text:
+        result.add_pass("DB reconnect endpoint exists (/api/health/reconnect)")
+    else:
+        result.add(Finding(
+            pitfall="db-reconnect",
+            severity="minor",
+            file=main_path,
+            line=0,
+            description="No /api/health/reconnect endpoint — operators cannot manually trigger reconnection",
+            suggestion="Add a CRON_SECRET-protected POST /api/health/reconnect endpoint",
+        ))
+
+    # Check 3: Shutdown cleanup for reconnect task
+    if "_db_reconnect_cancel.set()" in text:
+        result.add_pass("DB reconnect cancel event is set on shutdown")
+    else:
+        result.add(Finding(
+            pitfall="db-reconnect",
+            severity="minor",
+            file=main_path,
+            line=0,
+            description="Shutdown handler does not cancel the reconnect loop task",
+            suggestion="Call _db_reconnect_cancel.set() and await _db_reconnect_task on shutdown",
+        ))
+
+    # Check 4: Diagnostic reports reconnect status
+    if "reconnect_loop" in text and "diagnostic" in text.lower():
+        result.add_pass("Diagnostic endpoint reports reconnect loop status")
+    else:
+        result.add(Finding(
+            pitfall="db-reconnect",
+            severity="minor",
+            file=main_path,
+            line=0,
+            description="Diagnostic endpoint does not report reconnect loop status",
+            suggestion="Add reconnect_loop.active to the diagnostic endpoint db_url check",
+        ))
 
 
 def check_websocket_load_tests(py_files: List[str], result: AuditResult):
@@ -4442,7 +4572,117 @@ def check_no_duplicate_confidence_badge(jsx_files: list, result: AuditResult):
         )
 
 
-def check_duplicate_migration_ids(sql_files: list, result: AuditResult):
+def check_no_duplicate_status_colors(jsx_files: list, result: AuditResult):
+    """Audit check: STATUS_COLORS should be imported from api.js, not redefined locally.
+
+    Duplicating STATUS_COLORS in page components creates a maintenance trap:
+    if one copy is updated (e.g., adding a new status), the other silently
+    diverges. The canonical definition is in frontend/src/api.js.
+    """
+    # Canonical source
+    canonical_path = None
+    for fpath in jsx_files:
+        if "api.js" in fpath.replace("\\", "/"):
+            canonical_path = fpath
+            break
+
+    files_with_local_copy = []
+    files_with_import = []
+    for fpath in jsx_files:
+        if fpath == canonical_path:
+            continue
+        try:
+            src = open(fpath).read()
+        except Exception:
+            continue
+        # Look for local redefinition of the status color map
+        has_local_copy = bool(
+            re.search(r'const\s+DASHBOARD_STATUS_COLORS\s*=\s*\{', src)
+            or re.search(r'const\s+LOCAL_STATUS_COLORS\s*=\s*\{', src)
+            or (
+                re.search(r'const\s+STATUS_COLORS\s*=\s*\{', src)
+                and "api.js" not in fpath
+            )
+        )
+        has_import = "STATUS_COLORS" in src and "from '../api'" in src
+        if has_local_copy:
+            files_with_local_copy.append(fpath)
+        if has_import:
+            files_with_import.append(fpath)
+
+    if files_with_local_copy:
+        for f in files_with_local_copy:
+            result.add(Finding(
+                pitfall="duplicate-status-colors",
+                severity="minor",
+                file=f,
+                line=0,
+                description=(
+                    "STATUS_COLORS (or a variant like DASHBOARD_STATUS_COLORS) is "
+                    "defined locally in this file instead of being imported from api.js."
+                ),
+                suggestion=(
+                    "Import STATUS_COLORS from '../api' and remove the local definition."
+                ),
+            ))
+    else:
+        result.add_pass(
+            "STATUS_COLORS is not duplicated — all page files import from api.js"
+        )
+
+
+def check_no_duplicate_fmt_duration(jsx_files: list, result: AuditResult):
+    """Audit check: fmtDuration should be imported from api.js, not redefined locally.
+
+    Duplicating fmtDuration in page components creates a maintenance trap:
+    if one copy is updated (e.g., adding a new format), the other silently
+    diverges. The canonical definition is in frontend/src/api.js.
+    """
+    canonical_path = None
+    for fpath in jsx_files:
+        if "api.js" in fpath.replace("\\", "/"):
+            canonical_path = fpath
+            break
+
+    files_with_local_copy = []
+    for fpath in jsx_files:
+        if fpath == canonical_path:
+            continue
+        try:
+            src = open(fpath).read()
+        except Exception:
+            continue
+        # Look for local definition of fmtDuration function
+        has_local_copy = bool(
+            re.search(r'function\s+fmtDuration\s*\(', src)
+            or re.search(r'const\s+fmtDuration\s*=\s*\(', src)
+            or re.search(r'const\s+fmtDuration\s*=\s*async\s*\(', src)
+        )
+        if has_local_copy:
+            files_with_local_copy.append(fpath)
+
+    if files_with_local_copy:
+        for f in files_with_local_copy:
+            result.add(Finding(
+                pitfall="duplicate-fmt-duration",
+                severity="minor",
+                file=f,
+                line=0,
+                description=(
+                    "fmtDuration is defined locally in this file instead of "
+                    "being imported from api.js."
+                ),
+                suggestion=(
+                    "Import fmtDuration from '../api' and remove the local definition."
+                ),
+            ))
+    else:
+        result.add_pass(
+            "fmtDuration is not duplicated — all page files import from api.js"
+        )
+
+
+def check_no_duplicate_migration_ids(sql_files: list, result: AuditResult):
     """Audit check: No two migration files should share the same migration ID.
 
     Duplicate migration IDs cause silent migration skips: whichever file is
