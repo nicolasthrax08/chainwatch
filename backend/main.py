@@ -1005,7 +1005,7 @@ async def get_dashboard(user: dict = Depends(get_current_user)):
                 SELECT cts.id, cts.wallet_id, cts.token_symbol, cts.action,
                        cts.amount_usd, cts.confidence_score, cts.status,
                        cts.created_at, cts.explanation, cts.explanation_stale,
-                       cts.score_at_generation,
+                       cts.score_at_generation, cts.confidence_final,
                        w.address as wallet_address, w.label as wallet_label,
                        w.is_whale, w.is_mine, w.whale_score
                 FROM copy_trade_signals cts
@@ -1183,10 +1183,7 @@ async def get_dashboard(user: dict = Depends(get_current_user)):
                 "action": s["action"],
                 "amount_usd": float(s["amount_usd"] or 0),
                 "confidence_score": float(s["confidence_score"] or 0),
-                "confidence_final": round(
-                    0.5 * float(s["confidence_score"] or 0)
-                    + 0.5 * float(s["score_at_generation"] or 0), 2
-                ),
+                "confidence_final": float(s.get("confidence_final") or 0),
                 "status": s["status"],
                 "wallet_label": s["wallet_label"],
                 "wallet_address": s["wallet_address"],
