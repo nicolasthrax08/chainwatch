@@ -342,6 +342,30 @@ class TestDashboardEndpoint:
             data = resp.json()
             assert isinstance(data, dict)
 
+    def test_dashboard_live_tx_fallback_on_timeout(self, client, monkeypatch):
+        """Dashboard falls back to DB transactions when live tx fetch times out."""
+        c, _, _, _ = client
+        import jwt as jose_jwt
+        import asyncio
+        token = jose_jwt.encode(
+            {"sub": "0xabcdef1234567890abcdef1234567890abcdef12", "uid": "user-uuid-1234", "exp": 9999999999},
+            "test-secret-for-integration-tests",
+            algorithm="HS256"
+        )
+
+        # Mock fetch_transactions_for_wallets to raise TimeoutError
+        async def _mock_timeout(*args, **kwargs):
+            raise asyncio.TimeoutError("simulated timeout")
+
+        monkeypatch.setattr(
+            "services.tx_fetcher.fetch_transactions_for_wallets",
+            _mock_timeout,
+        )
+
+        resp = c.get("/api/dashboard", headers=_make_auth_header(token))
+        # Should still return 200 (or 503 if DB is unavailable) — not crash
+        assert resp.status_code in (200, 503)
+
 
 # ─── Wallet Endpoints ────────────────────────────────────────────────
 

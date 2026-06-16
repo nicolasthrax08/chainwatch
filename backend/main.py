@@ -298,22 +298,35 @@ async def lifespan(app: FastAPI):
     # ── Launch background DB auto-reconnect task ──
     # If the DB pool failed at startup (e.g., DNS not yet ready), this task
     # periodically retries the connection so the app self-heals without a
-    # full redeploy.  Runs every 60 s; stops on shutdown via cancel event.
+    # full redeploy.  Uses exponential backoff (60s → 120s → 300s → 600s max)
+    # to reduce log noise during prolonged outages. Stops on shutdown via
+    # cancel event.
     _db_reconnect_cancel = asyncio.Event()
+    # Manual reconnect trigger: set by /api/health/reconnect endpoint to
+    # force an immediate reconnection attempt (e.g., after env var change).
+    _db_reconnect_manual = asyncio.Event()
+    # Mutable state dict for the reconnect loop counter.
+    # Using a dict avoids nonlocal/global issues in nested async functions.
+    _db_reconnect_state = {"failures": 0}
 
     async def _db_reconnect_loop() -> None:
-        """Background task: retry DB pool creation until successful or cancelled."""
+        """Background task: retry DB pool creation until successful or cancelled.
+
+        Exponential backoff: 60s, 120s, 300s, 600s (max), reset on success.
+        Manual trigger via _db_reconnect_manual bypasses the backoff wait.
+        """
         import socket as _socket_mod
         from urllib.parse import urlparse as _urlparse_mod
         global db_pool
-        _retry_interval = 60  # seconds between reconnect attempts
+        _backoff_intervals = [60, 120, 300, 600]  # exponential backoff stages
         while not _db_reconnect_cancel.is_set():
             if db_pool is not None:
                 # DB is connected — exit the reconnect loop
                 logger.info("DB auto-reconnect: pool is healthy, stopping retry loop")
                 break
-            logger.info("DB auto-reconnect: attempting to create pool...")
-            _log_startup_event("db_reconnect_attempt")
+            _failures = _db_reconnect_state["failures"]
+            logger.info("DB auto-reconnect: attempting to create pool (consecutive_failures=%d)...", _failures)
+            _log_startup_event("db_reconnect_attempt", f"consecutive_failures={_failures}")
             # Parse hostname for DNS pre-resolution
             _db_host = None
             try:
@@ -326,11 +339,24 @@ async def lifespan(app: FastAPI):
                     _socket_mod.getaddrinfo(_db_host, None)
                 except Exception as _dns_err:
                     logger.info("DB auto-reconnect: DNS not ready yet: %s", _dns_err)
+                    _log_startup_event("db_reconnect_dns_failed", str(_dns_err))
+                    # Wait with backoff, but wake early on manual trigger
+                    _wait = _backoff_intervals[min(_db_reconnect_state["failures"], len(_backoff_intervals) - 1)]
+                    _db_reconnect_manual.clear()
                     try:
-                        await asyncio.wait_for(_db_reconnect_cancel.wait(), timeout=_retry_interval)
+                        await asyncio.wait_for(
+                            _first_triggered(_db_reconnect_cancel.wait(), _db_reconnect_manual.wait()),
+                            timeout=_wait,
+                        )
                     except asyncio.TimeoutError:
                         pass
-                    continue
+                    # If manual trigger was set, retry immediately below
+                    if not _db_reconnect_manual.is_set():
+                        _db_reconnect_state["failures"] += 1
+                        continue
+                    # Manual trigger: reset backoff and retry now
+                    logger.info("DB auto-reconnect: manual trigger received, retrying immediately")
+                    _db_reconnect_manual.clear()
             try:
                 _new_pool = await asyncpg.create_pool(
                     DATABASE_URL,
@@ -343,6 +369,7 @@ async def lifespan(app: FastAPI):
                 async with _new_pool.acquire() as _test_conn:
                     await _test_conn.fetchval("SELECT 1")
                 db_pool = _new_pool
+                _db_reconnect_failures = 0  # reset backoff on success
                 from services.instrumented_pool import instrument_pool
                 instrument_pool(db_pool)
                 _log_startup_event("db_reconnect_success")
@@ -355,12 +382,32 @@ async def lifespan(app: FastAPI):
                     logger.info("DB auto-reconnect: monitor started after reconnect")
                 break
             except Exception as _pool_err:
-                logger.warning("DB auto-reconnect: attempt failed: %s", _pool_err)
-                _log_startup_event("db_reconnect_failed", str(_pool_err))
-            # Wait before retrying (with early exit on cancel)
+                _db_reconnect_state["failures"] += 1
+                _failures = _db_reconnect_state["failures"]
+                logger.warning("DB auto-reconnect: attempt failed (%d consecutive): %s", _failures, _pool_err)
+                _log_startup_event("db_reconnect_failed", f"attempt={_failures} error={_pool_err}")
+            # Wait before retrying (with early exit on cancel or manual trigger)
+            _failures = _db_reconnect_state["failures"]
+            _wait = _backoff_intervals[min(_failures, len(_backoff_intervals) - 1)]
+            _db_reconnect_manual.clear()
             try:
-                await asyncio.wait_for(_db_reconnect_cancel.wait(), timeout=_retry_interval)
+                await asyncio.wait_for(
+                    _first_triggered(_db_reconnect_cancel.wait(), _db_reconnect_manual.wait()),
+                    timeout=_wait,
+                )
             except asyncio.TimeoutError:
+                pass
+
+    async def _first_triggered(*awaits):
+        """Race multiple awaitables; return when the first one completes.
+        Used to wake the reconnect loop early on manual trigger."""
+        tasks = [asyncio.create_task(a) for a in awaits]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for t in pending:
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
                 pass
 
     # Only start the reconnect loop if DB is not connected
@@ -820,6 +867,23 @@ async def clear_telegram_chat_id(
             user["id"],
         )
     return {"telegram_configured": False}
+
+
+@app.get("/api/user/telegram/status")
+async def get_telegram_status(
+    user: dict = Depends(get_current_user),
+):
+    """Return the user's Telegram notification configuration status."""
+    async with acquire_db() as conn:
+        row = await conn.fetchrow(
+            "SELECT telegram_chat_id FROM users WHERE id = $1",
+            user["id"],
+        )
+    chat_id = row["telegram_chat_id"] if row else None
+    return {
+        "telegram_configured": chat_id is not None,
+        "telegram_chat_id": chat_id,
+    }
 
 
 @app.get("/api/user/alpaca/status")

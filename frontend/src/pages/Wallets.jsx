@@ -1,38 +1,7 @@
 import React, { useState, useEffect } from 'react';
-
-import { API_BASE } from '../config';
 import { ChainBadge } from '../App';
-
-async function apiFetch(path, token, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-      ...options.headers,
-    },
-  });
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
-  return res.json();
-}
-
-function truncateAddress(addr) {
-  if (!addr) return '—';
-  return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
-}
-
-function fmtBalance(wallet, currency) {
-  let value;
-  if (currency === 'HKD') value = wallet.balance_hkd;
-  else if (currency === 'BTC') value = wallet.balance_btc;
-  else value = wallet.balance_usd;
-
-  if (value == null || value == undefined) return '—';  // null/undefined → no data; 0 is valid
-
-  if (currency === 'BTC') return `₿${value.toFixed(8)}`;
-  if (currency === 'HKD') return `HK$${value.toLocaleString()}`;
-  return `$${value.toLocaleString()}`;
-}
+import { apiFetch, fmtBalance, truncateAddress } from '../api';
+import { BalanceSourceIndicator } from '../components/BalanceSourceIndicator';
 
 function ScoreBar({ label, value, color }) {
   const pct = Math.round((value || 0) * 100);
@@ -409,7 +378,7 @@ function Wallets({ token, currency }) {
                       <td><ChainBadge chain={w.chain} showLabel={false} /></td>
                       <td>{w.label || '—'}</td>
                       <td className="address">{truncateAddress(w.address)}</td>
-                      <td>{fmtBalance(w, currency)}</td>
+                      <td>{fmtBalance(w, currency)}<BalanceSourceIndicator wallet={w} /></td>
                       <td>
                         {w.is_whale && <span className="tx-badge receive" style={{ marginRight: '4px' }}>Whale</span>}
                         {w.is_mine && <span className="tx-badge swap">Mine</span>}
@@ -417,25 +386,25 @@ function Wallets({ token, currency }) {
                       </td>
                       <td>
                         {w.whale_score != null && w.whale_score > 0 && (
-                          <span style={{
-                            fontSize: '0.7rem',
-                            fontWeight: 600,
-                            padding: '1px 6px',
-                            borderRadius: '3px',
-                            background: w.whale_score >= 0.7 ? 'rgba(139,92,246,0.2)' : 'rgba(139,143,152,0.15)',
-                            color: w.whale_score >= 0.7 ? '#c4b5fd' : '#8b8f98',
-                          }}>
-                            Score: {(w.whale_score * 100).toFixed(0)}%
-                          </span>
-                        )}
-                        {w.whale_score != null && w.whale_score > 0 && (
-                          <button
-                            className="btn btn-secondary btn-sm"
-                            style={{ fontSize: '0.65rem', padding: '1px 4px', marginLeft: '4px' }}
-                            onClick={() => handleViewScore(w)}
-                          >
-                            View
-                          </button>
+                          <>
+                            <span style={{
+                              fontSize: '0.7rem',
+                              fontWeight: 600,
+                              padding: '1px 6px',
+                              borderRadius: '3px',
+                              background: w.whale_score >= 0.7 ? 'rgba(139,92,246,0.2)' : 'rgba(139,143,152,0.15)',
+                              color: w.whale_score >= 0.7 ? '#c4b5fd' : '#8b8f98',
+                            }}>
+                              Score: {(w.whale_score * 100).toFixed(0)}%
+                            </span>
+                            <button
+                              className="btn btn-secondary btn-sm"
+                              style={{ fontSize: '0.65rem', padding: '1px 4px', marginLeft: '4px' }}
+                              onClick={() => handleViewScore(w)}
+                            >
+                              View
+                            </button>
+                          </>
                         )}
                       </td>
                       <td className="time-ago">{new Date(w.created_at).toLocaleDateString()}</td>

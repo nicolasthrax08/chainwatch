@@ -70,7 +70,7 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
                 "id", "address", "chain", "label", "is_whale", "is_mine",
                 "is_fresh_wallet", "risk_label",
                 "balance_usd", "balance_hkd", "balance_btc", "balance_native",
-                "last_balance_update", "created_at", "whale_score",
+                "balance_source", "last_balance_update", "created_at", "whale_score",
             },
             "portfolio": {
                 "total_value_usd", "total_value_hkd", "total_value_btc",
@@ -103,6 +103,7 @@ ENDPOINT_RESPONSES: List[EndpointResponse] = [
             "wallet": {
                 "id", "address", "chain", "label", "is_whale", "is_mine",
                 "balance_usd", "balance_hkd", "balance_btc",
+                "balance_source",
                 "whale_score",
                 "last_balance_update", "created_at",
             },

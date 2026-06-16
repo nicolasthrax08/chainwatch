@@ -124,19 +124,6 @@ export function fmtDuration(seconds) {
 }
 
 /**
- * Check whether a balance update timestamp is "live" (within the last 5 minutes).
- * Used by the Dashboard to show a green indicator dot next to fresh balances.
- *
- * @param {string|number|Date|null|undefined} timestamp
- * @returns {boolean}
- */
-export function isLiveUpdate(timestamp) {
-  if (!timestamp) return false;
-  const diffMs = Date.now() - new Date(timestamp).getTime();
-  return diffMs > 0 && diffMs < 5 * 60 * 1000;
-}
-
-/**
  * Signal status color mapping.
  * Used by CopyTrades, Dashboard, and any component that renders signal status.
  */

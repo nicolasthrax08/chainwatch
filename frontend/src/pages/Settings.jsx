@@ -1,19 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { API_BASE } from '../config';
-
-const THEME = {
-  bg: '#13141a',
-  cardBg: '#1c1d25',
-  border: '#2a2b35',
-  accent: '#8b5cf6',
-  accentHover: '#7c3aed',
-  muted: '#8b8f98',
-  text: '#e4e5ea',
-  success: '#10b8a6',
-  danger: '#ef4444',
-  dangerHover: '#dc2626',
-  warning: '#f59e0b',
-};
+import { apiFetch } from '../api';
+import { THEME } from '../theme';
 
 export default function Settings({ token }) {
   const [status, setStatus] = useState(null); // { connected, equity, account_id }
@@ -24,27 +11,80 @@ export default function Settings({ token }) {
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
 
+  // ── Telegram state ─────────────────────────────────────────────────
+  const [telegramChatId, setTelegramChatId] = useState('');
+  const [telegramConfigured, setTelegramConfigured] = useState(false);
+  const [telegramSaving, setTelegramSaving] = useState(false);
+  const [telegramError, setTelegramError] = useState('');
+  const [telegramSuccess, setTelegramSuccess] = useState('');
+
   // Fetch status on mount
   useEffect(() => {
     fetchStatus();
+    fetchTelegramStatus();
   }, []);
 
   const fetchStatus = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/user/alpaca/status`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setStatus(data);
-      } else {
-        setStatus({ connected: false, equity: null, account_id: null });
-      }
+      const data = await apiFetch('/user/alpaca/status', token);
+      setStatus(data);
     } catch {
       setStatus({ connected: false, equity: null, account_id: null });
     } finally {
       setLoading(false);
+    }
+  };
+
+  // ── Telegram handlers ───────────────────────────────────────────────
+  const fetchTelegramStatus = async () => {
+    try {
+      const data = await apiFetch('/user/telegram/status', token);
+      setTelegramConfigured(data.telegram_configured || false);
+      if (data.telegram_chat_id) {
+        setTelegramChatId(data.telegram_chat_id);
+      }
+    } catch {
+      // Endpoint may not exist yet; silently skip
+      setTelegramConfigured(false);
+    }
+  };
+
+  const handleTelegramSave = async () => {
+    setTelegramError('');
+    setTelegramSuccess('');
+    if (!telegramChatId.trim()) {
+      setTelegramError('Telegram Chat ID is required');
+      return;
+    }
+    setTelegramSaving(true);
+    try {
+      await apiFetch('/user/telegram', token, {
+        method: 'POST',
+        body: JSON.stringify({ chat_id: telegramChatId.trim() }),
+      });
+      setTelegramConfigured(true);
+      setTelegramSuccess('Telegram notifications enabled! You will receive alerts here.');
+    } catch (e) {
+      setTelegramError(e.message || 'Failed to save Telegram chat ID');
+    } finally {
+      setTelegramSaving(false);
+    }
+  };
+
+  const handleTelegramDisconnect = async () => {
+    setTelegramError('');
+    setTelegramSuccess('');
+    setTelegramSaving(true);
+    try {
+      await apiFetch('/user/telegram', token, { method: 'DELETE' });
+      setTelegramConfigured(false);
+      setTelegramChatId('');
+      setTelegramSuccess('Telegram notifications disabled');
+    } catch (e) {
+      setTelegramError(e.message || 'Failed to disconnect Telegram');
+    } finally {
+      setTelegramSaving(false);
     }
   };
 
@@ -57,25 +97,16 @@ export default function Settings({ token }) {
     }
     setSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/user/alpaca`, {
+      const data = await apiFetch('/user/alpaca', token, {
         method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
         body: JSON.stringify({ api_key: apiKey.trim(), secret_key: secretKey.trim() }),
       });
-      const data = await res.json();
-      if (res.ok) {
-        setSuccessMsg(`Connected! Equity: $${(data.equity || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
-        setStatus({ connected: true, equity: data.equity, account_id: data.account_id });
-        setApiKey('');
-        setSecretKey('');
-      } else {
-        setError(data.detail || 'Connection failed');
-      }
-    } catch {
-      setError('Network error — could not reach server');
+      setSuccessMsg(`Connected! Equity: $${(data.equity || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+      setStatus({ connected: true, equity: data.equity, account_id: data.account_id });
+      setApiKey('');
+      setSecretKey('');
+    } catch (e) {
+      setError(e.message || 'Connection failed');
     } finally {
       setSaving(false);
     }
@@ -86,19 +117,11 @@ export default function Settings({ token }) {
     setSuccessMsg('');
     setSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/user/alpaca`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) {
-        setStatus({ connected: false, equity: null, account_id: null });
-        setSuccessMsg('Alpaca account disconnected');
-      } else {
-        const data = await res.json();
-        setError(data.detail || 'Disconnect failed');
-      }
-    } catch {
-      setError('Network error — could not reach server');
+      await apiFetch('/user/alpaca', token, { method: 'DELETE' });
+      setStatus({ connected: false, equity: null, account_id: null });
+      setSuccessMsg('Alpaca account disconnected');
+    } catch (e) {
+      setError(e.message || 'Disconnect failed');
     } finally {
       setSaving(false);
     }
@@ -303,6 +326,135 @@ export default function Settings({ token }) {
             onMouseLeave={e => { e.target.style.backgroundColor = 'transparent'; }}
           >
             {saving ? 'Disconnecting...' : 'Disconnect Alpaca'}
+          </button>
+        )}
+
+      {/* Telegram Notification Card */}
+      <div style={{ ...card, marginTop: '24px' }}>
+        <h3 style={{
+          fontSize: '1.1rem',
+          fontWeight: 600,
+          color: THEME.text,
+          marginBottom: '6px',
+        }}>
+          📱 Telegram Notifications
+        </h3>
+        <p style={{
+          fontSize: '0.8rem',
+          color: THEME.muted,
+          marginBottom: '20px',
+          lineHeight: 1.5,
+        }}>
+          Receive whale alerts and signal notifications directly in your Telegram.
+          Get your Chat ID from @userinfobot on Telegram.
+        </p>
+
+        {/* Telegram status indicator */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px',
+          marginBottom: '20px',
+          padding: '12px 16px',
+          backgroundColor: THEME.bg,
+          borderRadius: '8px',
+          border: `1px solid ${THEME.border}`,
+        }}>
+          <span style={{
+            width: '10px',
+            height: '10px',
+            borderRadius: '50%',
+            backgroundColor: telegramConfigured ? THEME.success : THEME.muted,
+            flexShrink: 0,
+          }} />
+          <span style={{ color: telegramConfigured ? THEME.success : THEME.muted, fontSize: '0.85rem', fontWeight: 500 }}>
+            {telegramConfigured ? `Connected (Chat ID: ${telegramChatId})` : 'Not configured'}
+          </span>
+        </div>
+
+        {/* Telegram error / success */}
+        {telegramError && (
+          <div style={{
+            padding: '10px 14px',
+            marginBottom: '16px',
+            backgroundColor: 'rgba(239, 68, 68, 0.1)',
+            border: '1px solid rgba(239, 68, 68, 0.3)',
+            borderRadius: '8px',
+            color: THEME.danger,
+            fontSize: '0.85rem',
+          }}>
+            {telegramError}
+          </div>
+        )}
+        {telegramSuccess && (
+          <div style={{
+            padding: '10px 14px',
+            marginBottom: '16px',
+            backgroundColor: 'rgba(16, 184, 166, 0.1)',
+            border: '1px solid rgba(16, 184, 166, 0.3)',
+            borderRadius: '8px',
+            color: THEME.success,
+            fontSize: '0.85rem',
+          }}>
+            {telegramSuccess}
+          </div>
+        )}
+
+        {/* Telegram connect form */}
+        {!telegramConfigured && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+            <div>
+              <label style={{
+                display: 'block',
+                fontSize: '0.8rem',
+                color: THEME.muted,
+                marginBottom: '6px',
+                fontWeight: 500,
+              }}>
+                Telegram Chat ID
+              </label>
+              <input
+                type="text"
+                value={telegramChatId}
+                onChange={e => setTelegramChatId(e.target.value)}
+                placeholder="e.g. 123456789"
+                style={inputStyle}
+                autoComplete="off"
+              />
+            </div>
+            <button
+              onClick={handleTelegramSave}
+              disabled={telegramSaving}
+              style={{
+                ...btnBase,
+                backgroundColor: THEME.accent,
+                color: '#fff',
+                marginTop: '4px',
+              }}
+              onMouseEnter={e => { if (!telegramSaving) e.target.style.backgroundColor = THEME.accentHover; }}
+              onMouseLeave={e => { e.target.style.backgroundColor = THEME.accent; }}
+            >
+              {telegramSaving ? 'Saving...' : 'Enable Telegram'}
+            </button>
+          </div>
+        )}
+
+        {/* Telegram disconnect button */}
+        {telegramConfigured && (
+          <button
+            onClick={handleTelegramDisconnect}
+            disabled={telegramSaving}
+            style={{
+              ...btnBase,
+              backgroundColor: 'transparent',
+              color: THEME.danger,
+              border: `1px solid ${THEME.danger}`,
+              width: '100%',
+            }}
+            onMouseEnter={e => { if (!telegramSaving) { e.target.style.backgroundColor = 'rgba(239, 68, 68, 0.1)'; } }}
+            onMouseLeave={e => { e.target.style.backgroundColor = 'transparent'; }}
+          >
+            {telegramSaving ? 'Disconnecting...' : 'Disable Telegram Notifications'}
           </button>
         )}
       </div>

@@ -1,43 +1,6 @@
 import React, { useState, useEffect } from 'react';
-
-import { API_BASE } from '../config';
 import { ChainBadge } from '../components/ChainBadge';
-
-async function apiFetch(path, token, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-      ...options.headers,
-    },
-  });
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
-  return res.json();
-}
-
-function timeAgo(timestamp) {
-  if (!timestamp) return '—';
-  const diffMs = Date.now() - new Date(timestamp).getTime();
-  if (diffMs <= 0) return 'just now';
-  const seconds = Math.floor(diffMs / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return `${Math.floor(seconds / 86400)}d ago`;
-}
-
-function truncateAddress(addr) {
-  if (!addr) return '—';
-  return `${addr.slice(0, 8)}...${addr.slice(-6)}`;
-}
-
-function fmtTotal(value, currency) {
-  if (!value && value !== 0) return '—';
-  if (currency === 'BTC') return `₿${value.toFixed(8)}`;
-  if (currency === 'HKD') return `HK$${value.toLocaleString()}`;
-  return `$${value.toLocaleString()}`;
-}
+import { apiFetch, timeAgo, fmtTotal, truncateAddress } from '../api';
 
 const TX_TYPES = [
   { value: '', label: 'All Types' },

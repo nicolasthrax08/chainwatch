@@ -1,17 +1,20 @@
 {
-  "cycle": 14,
-  "timestamp": "2026-06-09T05:00:00Z",
+  "cycle": "2026-06-14_2200",
+  "timestamp": "2026-06-14T22:00:00Z",
   "tasks_completed": [
     {
-      "id": 33,
+      "id": "blockchain-fallback-fix-001",
       "type": "write_tool",
-      "result": "Added per-phase timing instrumentation to _poll_all_wallets_inner() in services/monitor.py. Six phases measured: phase1_read_wallets, phase2_prune_state, phase3_fetch_wallets, phase4_collect_changes, phase5_batch_update, phase6_signals_alerts. Phase durations stored in cycle stats ring buffer (exposed via /api/health), logged at INFO on every cycle, and WARNING if any phase exceeds 5s threshold."
+      "result": "Fixed BlockchairClient.get_balance() fallback to catch non-HTTP errors (ValueError from JSON decode). Changed except httpx.HTTPError to except Exception in both the outer and inner try blocks. Added 2 regression tests for JSON error → fallback paths. Commit 0afda86."
     }
   ],
-  "audit_result": "108/108 checks passed, 0 critical, 0 minor",
+  "audit_result": "0 critical, 4 minor (all false-positive Pitfall #10 in api.js null guards)",
   "files_modified": [
-    "backend/services/monitor.py"
+    "backend/services/blockchain.py",
+    "backend/tests/test_blockchain.py"
   ],
-  "git_commit": "24ef25d",
-  "peer_review": "solo audit — peer unavailable (DB unreachable from sandbox). Self-review score: 4/5. The instrumentation is additive, uses monotonic clock, has zero overhead when below threshold, and the phase_durations dict is reset each cycle preventing unbounded growth. The 5s warning threshold is reasonable for a 60s poll cycle."
+  "git_commit": "0afda86",
+  "peer_review": "solo audit — peer unavailable (delegate_task not accessible from cron sandbox). Self-review score: 5/5. The bug is real: resp.json() raises ValueError on invalid JSON which wasn't caught. The fix is minimal and correct. Regression tests cover both the success and failure paths.",
+  "test_count": 858,
+  "tests_added": 2
 }

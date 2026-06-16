@@ -1,0 +1,12 @@
+# DEPRECATED: Root-level migrations directory
+# ============================================
+#
+# This directory is a leftover from before the codebase was reorganized
+# into the `backend/` subdirectory. It is NOT used by the application.
+#
+# The canonical migration source is: backend/migrations/
+#
+# All new migrations MUST be added to backend/migrations/ only.
+# This directory should be removed in a future cleanup.
+#
+# See: pitfall #17 (dual-backend drift) in the dual-agent skill.

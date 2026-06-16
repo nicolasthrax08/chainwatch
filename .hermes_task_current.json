@@ -1,10 +1,10 @@
 {
-  "id": 36,
-  "task_type": "audit_outputs",
-  "payload": "{\"description\": \"Verify mirror_trade action guard and response validation are already implemented. Full codebase audit.\", \"priority\": \"medium\"}",
+  "id": "pipeline-integration-test-001",
+  "task_type": "write_tool",
+  "payload": "{\"description\": \"Add end-to-end integration test for the monitor -> signal -> alert pipeline\", \"priority\": \"high\"}",
   "status": "done",
-  "created_at": "2026-06-13T08:00:00Z",
-  "updated_at": "2026-06-13T08:10:00Z",
-  "result": "{\"findings\": \"0 critical, 0 minor. Both pending tasks already implemented. 755 tests pass. 171/171 audit checks pass.\", \"tasks_completed\": [\"mirror-trade-action-guard-fix-001\", \"mirror-trade-response-validation-001\"], \"tasks_spawned\": [\"signal-confidence-display-enhancement-001\", \"monitor-phase-timing-dashboard-001\"]}",
-  "critique": "solo audit — peer unavailable (delegate_task not accessible from cron sandbox). Self-review: 4/5. Thorough source review completed."
+  "created_at": "2026-06-14T21:00:00Z",
+  "updated_at": "2026-06-14T21:10:00Z",
+  "result": "{\"findings\": \"Created backend/tests/test_pipeline_integration.py with 28 integration tests covering the full monitor→signal→alert pipeline. All 856 tests pass (828 existing + 28 new). 0 regressions.\", \"tasks_spawned\": [\"db-connectivity-followup\", \"phase-durations-health-endpoint\"]}",
+  "critique": "solo audit — peer unavailable (delegate_task not accessible from cron sandbox). Self-review: 4/5. _FakeConn in-memory DB mock enables integration testing without PostgreSQL. Comprehensive coverage of signal generation, alert evaluation, cooldowns, dedup, confidence math, and explanation templates."
 }

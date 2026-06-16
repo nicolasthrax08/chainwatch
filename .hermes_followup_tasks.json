@@ -1,17 +1,43 @@
-[
-  {
-    "task_type": "review_thresholds",
-    "payload": "Revisit MAX_CONSECUTIVE_ERRORS (5 to 8) for RPC resilience. This has been deferred for two cycles — should be reviewed when production RPC reliability data is available.",
-    "status": "pending"
-  },
-  {
-    "task_type": "audit_outputs",
-    "payload": "After DB is restored in production, verify that phase timing data appears correctly in the /api/health response. Check that phase_durations_s is present in the cycle stats history.",
-    "status": "pending"
-  },
-  {
-    "task_type": "write_tool",
-    "payload": "Add a frontend component to display the whale score breakdown (all 5 sub-scores) in the wallet detail view. The backend endpoint GET /api/wallets/{wallet_id}/score returns all scoring data needed. The ScoreModal component already exists in Walleys.jsx — this task is about surfacing it more prominently.",
-    "status": "pending"
-  }
-]
+{
+  "tasks": [
+    {
+      "task_type": "analyze_failures",
+      "payload": "Check if the old migration filename '019_signal_confidence_final' was already logged in _migration_log. If the deployed DB has an entry for that file with migration_id='migration_019', the new '020_' file won't be applied automatically. Need to either delete the old entry or manually apply 020_.",
+      "status": "pending",
+      "created_at": "2026-06-14T01:10:00Z"
+    },
+    {
+      "task_type": "audit_outputs",
+      "payload": "Expose _phase_durations from the monitor worker in /api/health/metrics endpoint. The monitor already tracks per-phase timing in a _phase_durations dict but it's not surfaced via the health endpoint. Add it so operators can monitor phase performance without log parsing.",
+      "status": "done",
+      "created_at": "2026-06-13T08:10:00Z",
+      "completed_at": "2026-06-14T22:00:00Z",
+      "result": "Already implemented: /api/health/metrics calls get_phase_timings() from monitor.py which returns phase_durations_s, last_cycle_s, slow_phases."
+    },
+    {
+      "task_type": "write_tool",
+      "payload": "Fix PITFALL-2026-0614-001:_blockchain_fallback: BlockchairClient.get_balance() only catches httpx.HTTPError but resp.json() can raise ValueError on invalid JSON. This prevents the BlockCypher fallback from triggering. Impact: mempool.space returning corrupted/HTML responses crashes the monitor's asyncio.gather(). Fix: change except httpx.HTTPError to except Exception.",
+      "status": "done",
+      "created_at": "2026-06-14T22:00:00Z",
+      "completed_at": "2026-06-14T22:10:00Z",
+      "result": "Fixed in commit 0afda86. Changed both outer and inner except clauses from httpx.HTTPError to Exception. Added 2 regression tests. 858 tests pass."
+    },
+    {
+      "task_type": "analyze_failures",
+      "payload": "Investigate DB connectivity: DATABASE_URL hostname 'service-6a199cb95a225abf61ee099b' is unresolvable from the Zeabur container. This has been the primary blocker for 72+ hours across 8+ cycles. Check Zeabur dashboard for correct hostname, set CRON_SECRET, ALPACA_API_SECRET, and TELEGRAM_CHAT_ID env vars.",
+      "status": "pending",
+      "created_at": "2026-06-14T22:10:00Z"
+    }
+  ],
+  "completed_this_cycle": [
+    {
+      "id": "blockchain-fallback-fix-001",
+      "task_type": "write_tool",
+      "description": "Fix BlockchairClient.get_balance() fallback to catch non-HTTP errors (ValueError from resp.json()). Changed except httpx.HTTPError to except Exception.",
+      "result": "completed",
+      "commit": "0afda86",
+      "tests_added": 2,
+      "total_tests": 858
+    }
+  ]
+}

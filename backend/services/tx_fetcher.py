@@ -176,14 +176,6 @@ async def fetch_btc_transactions(
             return []
 
 
-def tx_type_determine(tx: dict, address: str) -> str:
-    """Placeholder for BlockCypher tx direction detection.
-    BlockCypher txrefs don't expose per-address direction in list form.
-    Always returns 'unknown'; the primary mempool.space path handles this correctly.
-    """
-    return "unknown"
-
-
 # ─── ETH: Etherscan (requires API key) ─────────────────────────────
 async def fetch_eth_transactions(
     address: str, limit: int = 10

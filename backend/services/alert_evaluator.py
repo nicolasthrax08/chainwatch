@@ -73,7 +73,7 @@ async def evaluate_alerts(
 
     Args:
         conn: active asyncpg connection (caller manages transaction)
-        changed_wallets: list of (wid, addr, chain, is_whale, is_mine, user_id, result)
+        changed_wallets: list of (wid, addr, label, chain, is_whale, is_mine, user_id, result)
                          where result = (bal_native, bal_usd, tx_hash, tx_type, token, tx_amount_native)
         prev_balance_map: dict of wid → prev_balance_usd (captured before Phase 5 update)
 
@@ -85,7 +85,7 @@ async def evaluate_alerts(
         return []
 
     # Collect distinct user_ids
-    changed_user_ids = list({uid for _, _, _, _, _, uid, _ in changed_wallets})
+    changed_user_ids = list({uid for _, _, _, _, _, _, uid, _ in changed_wallets})
 
     rows = await conn.fetch(
         """
@@ -106,7 +106,7 @@ async def evaluate_alerts(
     # This avoids N+1 per-tx SELECT inside the rule evaluation loop (Pitfall #16).
     _tx_usd_cache: dict = {}  # (wallet_id, tx_hash) → usd_value
     tx_lookup_pairs: list = []
-    for wid, _, _, _, _, _, result in changed_wallets:
+    for wid, _, _, _, _, _, _, result in changed_wallets:
         tx_hash = result[2]  # result = (bal_native, bal_usd, tx_hash, tx_type, token, tx_amount_native)
         if tx_hash:
             tx_lookup_pairs.append((wid, tx_hash))
@@ -153,7 +153,7 @@ async def evaluate_alerts(
         try:
             if rule_type == "large_transaction":
                 # Check if any changed wallet for this user has a tx above threshold
-                for wid, addr, chain, is_whale, is_mine_flag, uid, result in changed_wallets:
+                for wid, addr, _label, chain, is_whale, is_mine_flag, uid, result in changed_wallets:
                     if str(uid) != str(user_id):
                         continue
                     tx_hash = result[2]
@@ -186,7 +186,7 @@ async def evaluate_alerts(
 
             elif rule_type == "whale_buy":
                 # Check if any whale wallet for this user made a buy above threshold
-                for wid, addr, chain, is_whale, is_mine_flag, uid, result in changed_wallets:
+                for wid, addr, _label, chain, is_whale, is_mine_flag, uid, result in changed_wallets:
                     if str(uid) != str(user_id) or not is_whale:
                         continue
                     tx_hash = result[2]
@@ -235,7 +235,7 @@ async def evaluate_alerts(
                 # This avoids a redundant DB query for prev_total_row (Pitfall #16).
                 delta_sum = sum(
                     (result[1] - prev_balance_map.get(wid, result[1]))  # delta = current - prev
-                    for wid, _, _, is_whale_flag, is_mine_flag, uid, result in changed_wallets
+                    for wid, _, _, _, is_whale_flag, is_mine_flag, uid, result in changed_wallets
                     if str(uid) == str(user_id) and is_mine_flag and not is_whale_flag
                 )
                 prev_total = current_total - delta_sum
@@ -255,7 +255,7 @@ async def evaluate_alerts(
 
             elif rule_type == "balance_drop":
                 # Check if any personal (owned) wallet's balance dropped by threshold %
-                for wid, addr, chain, is_whale, is_mine_flag, uid, result in changed_wallets:
+                for wid, addr, _label, chain, is_whale, is_mine_flag, uid, result in changed_wallets:
                     # Finding 12 FIX: skip non-owned wallets (only alert on is_mine wallets)
                     if str(uid) != str(user_id) or is_whale or not is_mine_flag:
                         continue

@@ -1,61 +1,11 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { API_BASE } from '../config';
 import { ChainBadge } from '../App';
 import { ConfidenceBadge } from '../components/ConfidenceBadge';
+import {
+  apiFetch, timeAgo, fmtTotal, truncateAddress, fmtDuration, STATUS_COLORS,
+} from '../api';
 
-async function apiFetch(path, token, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`,
-      ...options.headers,
-    },
-  });
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
-  return res.json();
-}
-
-function timeAgo(timestamp) {
-  if (!timestamp) return '--';
-  const diffMs = Date.now() - new Date(timestamp).getTime();
-  if (diffMs <= 0) return 'just now';
-  const seconds = Math.floor(diffMs / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return `${Math.floor(seconds / 86400)}d ago`;
-}
-
-function fmtTotal(value, currency) {
-  if (!value && value !== 0) return '--';
-  if (currency === 'BTC') return `₿${value.toFixed(8)}`;
-  if (currency === 'HKD') return `HK$${value.toLocaleString()}`;
-  return `$${value.toLocaleString()}`;
-}
-
-const STATUS_COLORS = {
-  pending: '#f59e0b',
-  executed: '#10b981',
-  failed: '#ef4444',
-  stale: '#6b7280',
-};
-
-function truncateAddress(addr) {
-  if (!addr) return '—';
-  return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
-}
-
-function fmtDuration(seconds) {
-  if (!seconds && seconds !== 0) return '—';
-  const s = Math.round(seconds);
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
-  return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
-}
-
-function AnalyzeModal({ signal, currency, onMirror, onClose }) {
+function AnalyzeModal({ signal, currency, onMirror, onClose, token }) {
   if (!signal) return null;
   return (
     <div
@@ -653,6 +603,7 @@ function CopyTrades({ token, currency }) {
         currency={currency}
         onMirror={handleMirror}
         onClose={() => setAnalyzeSignal(null)}
+        token={token}
       />
     </div>
   );

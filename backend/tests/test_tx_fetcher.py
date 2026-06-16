@@ -18,7 +18,6 @@ Tests cover:
   exception isolation, wallet annotation
 - classify_wallet: whale threshold (>=), fresh wallet, normal,
   unknown chain, boundary values
-- tx_type_determine: always returns 'unknown' for BlockCypher
 
 Run: python3 -m pytest tests/test_tx_fetcher.py -v
 """
@@ -852,17 +851,6 @@ class TestClassifyWallet(unittest.TestCase):
         self.assertTrue(result["is_whale"])
         self.assertTrue(result["is_fresh_wallet"])
         self.assertEqual(result["risk_label"], "whale")
-
-
-class TestTxTypeDetermine(unittest.TestCase):
-    """Test the BlockCypher tx direction placeholder."""
-
-    def test_always_returns_unknown(self):
-        """tx_type_determine should always return 'unknown' for BlockCypher."""
-        self.assertEqual(tx_fetcher.tx_type_determine({}, "any_addr"), "unknown")
-        self.assertEqual(
-            tx_fetcher.tx_type_determine({"value": 1000}, "bc1qtest"), "unknown"
-        )
 
 
 if __name__ == "__main__":

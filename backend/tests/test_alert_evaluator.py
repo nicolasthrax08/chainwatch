@@ -56,6 +56,7 @@ def _make_alert_row(
 def _make_changed_wallet(
     wid="wallet-001",
     addr="0xabc123",
+    label=None,
     chain="eth",
     is_whale=False,
     is_mine=True,
@@ -69,7 +70,7 @@ def _make_changed_wallet(
 ):
     """Create a changed_wallets tuple."""
     result = (bal_native, bal_usd, tx_hash, tx_type, token, tx_amount_native)
-    return (wid, addr, chain, is_whale, is_mine, user_id, result)
+    return (wid, addr, label, chain, is_whale, is_mine, user_id, result)
 
 
 class TestCooldownCache(unittest.TestCase):
