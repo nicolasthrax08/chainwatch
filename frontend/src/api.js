@@ -161,14 +161,14 @@ export async function checkApiHealth() {
       return {
         ok: false,
         status: body.status || 'degraded',
-        dbOk: body.db?.ok ?? false,
+        dbOk: body.subsystems?.db?.ok ?? false,
       };
     }
     const body = await res.json();
     return {
       ok: body.status === 'healthy',
       status: body.status || 'healthy',
-      dbOk: body.db?.ok ?? false,
+      dbOk: body.subsystems?.db?.ok ?? false,
     };
   } catch {
     // Network error, timeout, DNS failure, etc.

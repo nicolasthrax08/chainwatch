@@ -3988,6 +3988,7 @@ def run_audit(base_path: str) -> AuditResult:
     check_no_duplicate_status_colors(jsx_files, result)
     check_no_duplicate_fmt_duration(jsx_files, result)
     check_frontend_test_infrastructure(jsx_files, py_files, result)
+    check_health_api_contract(jsx_files, result)
     check_jose_not_imported_in_tests(py_files, result)
     check_no_duplicate_migration_ids(sql_files, result)
     check_websocket_load_tests(py_files, result)
@@ -4723,6 +4724,44 @@ def check_frontend_test_infrastructure(jsx_files: list, py_files: list, result: 
             description="No component test files (ConfidenceBadge, BalanceSourceIndicator, etc.)",
             suggestion="Create frontend/src/tests/ConfidenceBadge.test.jsx with rendering and behavior tests",
         ))
+
+
+def check_health_api_contract(jsx_files: list, result: AuditResult):
+    """Audit check: checkApiHealth must read dbOk from body.subsystems.db.ok.
+
+    The /api/health endpoint returns DB status at subsystems.db.ok, not at the
+    top-level db.ok. If checkApiHealth reads body.db?.ok, dbOk will always be
+    false, causing the HealthBanner to permanently show 'DB unavailable'.
+    """
+    for fpath in jsx_files:
+        if "api.js" not in fpath.replace("\\", "/"):
+            continue
+        try:
+            src = read_file(fpath)
+        except Exception:
+            continue
+        # Look for the buggy pattern: body.db?.ok (without subsystems)
+        # The correct pattern is: body.subsystems?.db?.ok
+        import re
+        buggy = re.search(r'body\.db\?\.ok', src)
+        correct = re.search(r'body\.subsystems\?\.db\?\.ok', src)
+        if buggy and not correct:
+            result.add(Finding(
+                pitfall="health-api-contract",
+                severity="moderate",
+                file=fpath,
+                line=src[:buggy.start()].count('\n') + 1,
+                description=(
+                    "checkApiHealth reads body.db?.ok but /api/health returns "
+                    "DB status at body.subsystems.db.ok. dbOk will always be false."
+                ),
+                suggestion="Change body.db?.ok to body.subsystems?.db?.ok",
+            ))
+        elif correct:
+            result.add_pass(
+                "health-api-contract: checkApiHealth reads dbOk from subsystems.db.ok"
+            )
+        break
 
 
 def check_no_duplicate_fmt_duration(jsx_files: list, result: AuditResult):

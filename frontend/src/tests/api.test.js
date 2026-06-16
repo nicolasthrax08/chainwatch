@@ -6,6 +6,7 @@ import {
   fmtBalance,
   fmtDuration,
   STATUS_COLORS,
+  checkApiHealth,
 } from '../api';
 
 describe('timeAgo', () => {
@@ -190,5 +191,97 @@ describe('STATUS_COLORS', () => {
 
   it('has exactly 4 status entries', () => {
     expect(Object.keys(STATUS_COLORS).length).toBe(4);
+  });
+});
+
+describe('checkApiHealth', () => {
+  // Mock fetch globally for these tests
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('returns ok=true when API is healthy', async () => {
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        status: 'healthy',
+        subsystems: { db: { ok: true } },
+      }),
+    });
+    const result = await checkApiHealth();
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe('healthy');
+    expect(result.dbOk).toBe(true);
+  });
+
+  it('returns ok=false and dbOk=false when DB is down', async () => {
+    globalThis.fetch = async () => ({
+      ok: false,
+      json: async () => ({
+        status: 'degraded',
+        subsystems: { db: { ok: false } },
+      }),
+    });
+    const result = await checkApiHealth();
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe('degraded');
+    expect(result.dbOk).toBe(false);
+  });
+
+  it('returns ok=false when API returns 503', async () => {
+    globalThis.fetch = async () => ({
+      ok: false,
+      json: async () => ({
+        status: 'degraded',
+        subsystems: { db: { ok: true } },
+      }),
+    });
+    const result = await checkApiHealth();
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe('degraded');
+  });
+
+  it('returns unreachable on network error', async () => {
+    globalThis.fetch = async () => { throw new Error('Network error'); };
+    const result = await checkApiHealth();
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe('unreachable');
+    expect(result.dbOk).toBe(false);
+  });
+
+  it('returns unreached on timeout', async () => {
+    globalThis.fetch = async () => { throw new DOMException('Timeout', 'AbortError'); };
+    const result = await checkApiHealth();
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe('unreachable');
+    expect(result.dbOk).toBe(false);
+  });
+
+  it('reads dbOk from subsystems.db.ok (not body.db)', async () => {
+    // This test catches the bug where body.db?.ok was used instead of body.subsystems?.db?.ok
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        status: 'healthy',
+        subsystems: { db: { ok: true, latency_ms: 5.2 } },
+        // Note: no top-level 'db' key — the old buggy code would return false here
+      }),
+    });
+    const result = await checkApiHealth();
+    expect(result.dbOk).toBe(true);
+  });
+
+  it('defaults dbOk to false when subsystems is missing', async () => {
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        status: 'healthy',
+        // No subsystems key at all
+      }),
+    });
+    const result = await checkApiHealth();
+    expect(result.dbOk).toBe(false);
   });
 });
