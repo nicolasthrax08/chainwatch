@@ -2127,6 +2127,12 @@ def check_double_dollar_in_template_literals(jsx_files: List[str], result: Audit
                 if any(re.search(sp, expr) for sp in safe_patterns):
                     continue
                 # Skip HK$ patterns (Hong Kong dollar prefix is intentional)
+                # Check within the matched template literal: HK$${val} → literal HK$ + val
+                full_match = m.group(0)
+                dd_pos = full_match.find("$$")
+                if dd_pos >= 0 and full_match[:dd_pos].rstrip().endswith("HK"):
+                    continue
+                # Also check if HK$ appears before $$ on the same line (outside template)
                 if "HK$" in line[:m.start()]:
                     continue
                 result.add(Finding(
@@ -2148,6 +2154,83 @@ def check_double_dollar_in_template_literals(jsx_files: List[str], result: Audit
 
     if not found_any:
         result.add_pass("Pitfall #14: No $$ in template literals found")
+
+
+# ─── Per-wallet DB connection in for-loop (Pitfall #16 sub-pattern) ────
+def check_per_wallet_db_connection(py_files: List[str], result: AuditResult):
+    """
+    Detect monitor workers that acquire a DB connection per-wallet inside a
+    for-loop (N wallets = N sequential connection acquisitions). This is a
+    sub-pattern of Pitfall #16 (N+1 queries) combined with Pitfall #7
+    (connection held across I/O).
+
+    The correct pattern: batch all wallet reads/writes into a single query
+    using WHERE id = ANY($1) instead of looping.
+
+    This check flags the pattern but does NOT fail the audit — it reports
+    as a minor finding since the pattern may be intentional for per-wallet
+    error isolation.
+    """
+    if not py_files:
+        result.add_pass("Per-wallet DB connection: No Python files to scan")
+        return
+
+    # Pattern: for ... in ...:  followed by async with _pool.acquire() as conn
+    # within the next ~25 lines, at deeper indentation (inside the for body).
+    found_any = False
+    for fpath in py_files:
+        if _is_test_file(fpath):
+            continue
+        text = read_file(fpath)
+        if "_pool.acquire()" not in text:
+            continue
+        file_lines = lines(text)
+        for i, line in enumerate(file_lines, 1):
+            stripped = line.strip()
+            if not stripped.startswith("for "):
+                continue
+            for_indent = len(line) - len(line.lstrip())
+            # Look ahead up to 25 lines for async with _pool.acquire
+            # at deeper indentation than the for-loop (inside the body)
+            block_end = min(i + 25, len(file_lines))
+            has_acquire = False
+            for j in range(i + 1, block_end):
+                blk_line = file_lines[j]
+                if not blk_line.strip():
+                    continue
+                blk_indent = len(blk_line) - len(blk_line.lstrip())
+                # Only consider lines deeper than the for-loop
+                if blk_indent <= for_indent:
+                    continue
+                if "async with" in blk_line and "_pool.acquire" in blk_line:
+                    has_acquire = True
+                    break
+                if "async with" in blk_line and "acquire" in blk_line and "pool" in blk_line:
+                    has_acquire = True
+                    break
+            if has_acquire:
+                # Check if it's inside a monitor/signal/alert file
+                if any(kw in fpath for kw in ("monitor", "signal", "alert", "worker")):
+                    result.add(Finding(
+                        pitfall="per-wallet-conn",
+                        severity="minor",
+                        file=fpath,
+                        line=i,
+                        description=(
+                            f"Per-wallet DB connection in for-loop at line {i} — "
+                            f"each iteration acquires a separate connection from the pool. "
+                            f"With many wallets, this can exhaust the pool under load."
+                        ),
+                        suggestion=(
+                            "Consider batching: fetch all whale scores in one query, "
+                            "generate signals in memory, then insert all signals in one "
+                            "transaction. This reduces N connections to 1."
+                        ),
+                    ))
+                    found_any = True
+
+    if not found_any:
+        result.add_pass("Per-wallet DB connection: No per-wallet pool.acquire() in for-loops found")
 
 
 # ─── Pitfall #11: Grid layout breakage in JSX ─────────────────────────
@@ -3974,6 +4057,7 @@ def run_audit(base_path: str) -> AuditResult:
     check_balance_vs_event_amount(py_files, result)
     check_db_conn_held_across_http(py_files, result)
     check_double_dollar_in_template_literals(jsx_files, result)
+    check_per_wallet_db_connection(py_files, result)
     check_grid_layout_breakage(jsx_files, result)
     check_dead_variable_cascade(py_files, result)
     check_pyright_builtin_generics(py_files, result)

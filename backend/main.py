@@ -650,6 +650,22 @@ class AlpacaConnectRequest(BaseModel):
     secret_key: str = Field(..., min_length=20, max_length=255)
 
 
+class SignalOutcomeRequest(BaseModel):
+    """Request body for recording user outcome on a signal."""
+    user_pnl_usd: Optional[float] = Field(
+        None, ge=-1_000_000, le=1_000_000,
+        description="Realized P&L in USD from following this signal (negative = loss)",
+    )
+    user_outcome: Optional[str] = Field(
+        None, pattern="^(profit|loss|breakeven|skipped)$",
+        description="Outcome category: profit, loss, breakeven, or skipped",
+    )
+    user_notes: Optional[str] = Field(
+        None, max_length=500,
+        description="Optional free-text notes about the trade",
+    )
+
+
 # ─── Auth Endpoints ─────────────────────────────────────────────────
 
 @app.post("/api/auth/challenge")
@@ -1813,6 +1829,11 @@ async def get_signals(
                 "explanation": s.get("explanation"),
                 "explanation_stale": bool(s.get("explanation_stale", False)),
                 "score_at_generation": float(s.get("score_at_generation") or 0),
+                # Outcome tracking columns (migration 022)
+                "user_pnl_usd": float(s["user_pnl_usd"]) if s.get("user_pnl_usd") is not None else None,
+                "user_outcome": s.get("user_outcome"),
+                "user_notes": s.get("user_notes"),
+                "reviewed_at": s["reviewed_at"].isoformat() if s.get("reviewed_at") else None,
             }
             for s in signals
         ]
@@ -1969,6 +1990,7 @@ async def get_signal_history(
                    cts.score_at_generation,
                    cts.status, cts.explanation, cts.explanation_stale,
                    cts.created_at, cts.executed_at, cts.closed_at,
+                   cts.user_pnl_usd, cts.user_outcome, cts.user_notes, cts.reviewed_at,
                    EXTRACT(EPOCH FROM (cts.closed_at - cts.created_at)) AS time_to_close_seconds,
                    w.address AS wallet_address, w.label AS wallet_label,
                    w.whale_score
@@ -2001,10 +2023,223 @@ async def get_signal_history(
                 "executed_at": r["executed_at"].isoformat() if r["executed_at"] else None,
                 "closed_at": r["closed_at"].isoformat() if r["closed_at"] else None,
                 "time_to_close_seconds": float(r["time_to_close_seconds"] or 0),
+                "user_pnl_usd": float(r["user_pnl_usd"]) if r["user_pnl_usd"] is not None else None,
+                "user_outcome": r["user_outcome"],
+                "user_notes": r["user_notes"],
+                "reviewed_at": r["reviewed_at"].isoformat() if r["reviewed_at"] else None,
             }
             for r in rows
         ],
         "count": len(rows),
+    }
+
+
+# ─── Signal Outcome Endpoints ─────────────────────────────────────────
+
+
+@app.post("/api/signals/{signal_id}/outcome")
+async def record_signal_outcome(
+    signal_id: str,
+    body: SignalOutcomeRequest,
+    user: dict = Depends(get_current_user),
+):
+    """
+    Record user-reported outcome for a copy-trade signal.
+
+    Allows the user to record their realized P&L, outcome category,
+    and optional notes for a signal they followed (or chose to skip).
+
+    Only the owner of the signal's wallet can record an outcome.
+    At least one of user_pnl_usd or user_outcome must be provided.
+
+    Returns the updated signal with outcome fields.
+    """
+    # Validate: at least one field must be provided
+    if body.user_pnl_usd is None and body.user_outcome is None:
+        raise HTTPException(
+            status_code=422,
+            detail="At least one of user_pnl_usd or user_outcome must be provided",
+        )
+
+    async with acquire_db() as conn:
+        # Verify signal exists and belongs to the user
+        existing = await conn.fetchrow(
+            """
+            SELECT cts.id
+            FROM copy_trade_signals cts
+            JOIN wallets w ON w.id = cts.wallet_id
+            WHERE cts.id = $1 AND w.user_id = $2
+            """,
+            signal_id, user["id"],
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="Signal not found")
+
+        # Upsert outcome: update the signal row with user-reported data
+        # Use COALESCE so that omitted fields retain their previous values
+        # (allows partial updates: e.g., set P&L first, outcome later)
+        row = await conn.fetchrow(
+            """
+            UPDATE copy_trade_signals
+            SET user_pnl_usd = COALESCE($2, user_pnl_usd),
+                user_outcome = COALESCE($3, user_outcome),
+                user_notes = COALESCE($4, user_notes),
+                reviewed_at = NOW()
+            WHERE id = $1
+            RETURNING id, token_symbol, action, amount_usd,
+                      confidence_score, confidence_final,
+                      score_at_generation, status,
+                      user_pnl_usd, user_outcome, user_notes,
+                      created_at, reviewed_at
+            """,
+            signal_id,
+            body.user_pnl_usd,
+            body.user_outcome,
+            body.user_notes,
+        )
+
+    return {
+        "signal": {
+            "id": str(row["id"]),
+            "token_symbol": row["token_symbol"],
+            "action": row["action"],
+            "amount_usd": float(row["amount_usd"] or 0),
+            "confidence_score": float(row["confidence_score"] or 0),
+            "confidence_final": float(row["confidence_final"] or 0),
+            "score_at_generation": float(row["score_at_generation"] or 0),
+            "status": row["status"],
+            "user_pnl_usd": float(row["user_pnl_usd"]) if row["user_pnl_usd"] is not None else None,
+            "user_outcome": row["user_outcome"],
+            "user_notes": row["user_notes"],
+            "created_at": row["created_at"].isoformat(),
+            "reviewed_at": row["reviewed_at"].isoformat() if row["reviewed_at"] else None,
+        }
+    }
+
+
+@app.get("/api/signals/outcome-stats")
+async def get_outcome_stats(
+    user: dict = Depends(get_current_user),
+):
+    """
+    Aggregate statistics for user-reviewed signal outcomes.
+
+    Returns:
+        - total_reviewed: total number of signals with a user-reviewed outcome
+        - by_outcome: count per outcome category (profit/loss/breakeven/skipped)
+        - total_pnl_usd: sum of user_pnl_usd across all reviewed signals
+        - avg_pnl_usd: average P&L per reviewed signal
+        - win_rate: fraction of reviewed signals with outcome='profit'
+        - avg_pnl_by_tier: average P&L segmented by whale score tier at generation
+        - avg_pnl_by_confidence: average P&L segmented by confidence tier
+    """
+    async with acquire_db() as conn:
+        # Overall outcome aggregates
+        overall = await conn.fetchrow(
+            """
+            SELECT
+                COUNT(*) AS total_reviewed,
+                COUNT(*) FILTER (WHERE cts.user_outcome = 'profit') AS profit_count,
+                COUNT(*) FILTER (WHERE cts.user_outcome = 'loss') AS loss_count,
+                COUNT(*) FILTER (WHERE cts.user_outcome = 'breakeven') AS breakeven_count,
+                COUNT(*) FILTER (WHERE cts.user_outcome = 'skipped') AS skipped_count,
+                ROUND(SUM(cts.user_pnl_usd)::DECIMAL, 2) AS total_pnl_usd,
+                ROUND(AVG(cts.user_pnl_usd)::DECIMAL, 2) AS avg_pnl_usd,
+                ROUND(AVG(cts.user_pnl_usd) FILTER (WHERE cts.user_outcome = 'profit')::DECIMAL, 2) AS avg_profit_usd,
+                ROUND(AVG(cts.user_pnl_usd) FILTER (WHERE cts.user_outcome = 'loss')::DECIMAL, 2) AS avg_loss_usd
+            FROM copy_trade_signals cts
+            JOIN wallets w ON w.id = cts.wallet_id
+            WHERE w.user_id = $1
+              AND cts.user_outcome IS NOT NULL
+            """,
+            user["id"],
+        )
+
+        # P&L by whale score tier at generation
+        tier_rows = await conn.fetch(
+            """
+            SELECT
+                CASE
+                    WHEN cts.score_at_generation >= 0.7 THEN 'high'
+                    WHEN cts.score_at_generation >= 0.4 THEN 'medium'
+                    ELSE 'low'
+                END AS tier,
+                COUNT(*) AS tier_reviewed,
+                ROUND(SUM(cts.user_pnl_usd)::DECIMAL, 2) AS tier_total_pnl,
+                ROUND(AVG(cts.user_pnl_usd)::DECIMAL, 2) AS tier_avg_pnl,
+                COUNT(*) FILTER (WHERE cts.user_outcome = 'profit') AS tier_profit_count
+            FROM copy_trade_signals cts
+            JOIN wallets w ON w.id = cts.wallet_id
+            WHERE w.user_id = $1
+              AND cts.user_outcome IS NOT NULL
+            GROUP BY tier
+            ORDER BY tier
+            """,
+            user["id"],
+        )
+
+        # P&L by confidence tier
+        conf_rows = await conn.fetch(
+            """
+            SELECT
+                CASE
+                    WHEN cts.confidence_final >= 0.75 THEN 'high'
+                    WHEN cts.confidence_final >= 0.55 THEN 'medium'
+                    ELSE 'low'
+                END AS conf_tier,
+                COUNT(*) AS conf_reviewed,
+                ROUND(SUM(cts.user_pnl_usd)::DECIMAL, 2) AS conf_total_pnl,
+                ROUND(AVG(cts.user_pnl_usd)::DECIMAL, 2) AS conf_avg_pnl
+            FROM copy_trade_signals cts
+            JOIN wallets w ON w.id = cts.wallet_id
+            WHERE w.user_id = $1
+              AND cts.user_outcome IS NOT NULL
+            GROUP BY conf_tier
+            ORDER BY conf_tier
+            """,
+            user["id"],
+        )
+
+    total_reviewed = overall["total_reviewed"] or 0
+    profit_count = overall["profit_count"] or 0
+
+    # Build P&L by whale score tier
+    pnl_by_tier = {}
+    for tr in tier_rows:
+        tier_rev = tr["tier_reviewed"] or 0
+        tier_prof = tr["tier_profit_count"] or 0
+        pnl_by_tier[tr["tier"]] = {
+            "reviewed": tier_rev,
+            "total_pnl_usd": float(tr["tier_total_pnl"] or 0),
+            "avg_pnl_usd": float(tr["tier_avg_pnl"] or 0),
+            "win_rate": round(tier_prof / tier_rev, 3) if tier_rev > 0 else 0.0,
+        }
+
+    # Build P&L by confidence tier
+    pnl_by_conf = {}
+    for cr in conf_rows:
+        conf_rev = cr["conf_reviewed"] or 0
+        pnl_by_conf[cr["conf_tier"]] = {
+            "reviewed": conf_rev,
+            "total_pnl_usd": float(cr["conf_total_pnl"] or 0),
+            "avg_pnl_usd": float(cr["conf_avg_pnl"] or 0),
+        }
+
+    return {
+        "total_reviewed": total_reviewed,
+        "by_outcome": {
+            "profit": profit_count,
+            "loss": overall["loss_count"] or 0,
+            "breakeven": overall["breakeven_count"] or 0,
+            "skipped": overall["skipped_count"] or 0,
+        },
+        "total_pnl_usd": float(overall["total_pnl_usd"] or 0),
+        "avg_pnl_usd": float(overall["avg_pnl_usd"] or 0),
+        "win_rate": round(profit_count / total_reviewed, 3) if total_reviewed > 0 else 0.0,
+        "avg_profit_usd": float(overall["avg_profit_usd"] or 0),
+        "avg_loss_usd": float(overall["avg_loss_usd"] or 0),
+        "pnl_by_whale_tier": pnl_by_tier,
+        "pnl_by_confidence_tier": pnl_by_conf,
     }
 
 
