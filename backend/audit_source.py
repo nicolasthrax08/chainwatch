@@ -4015,8 +4015,53 @@ def run_audit(base_path: str) -> AuditResult:
     check_db_reconnect_feature(py_files, result)
     check_signal_explanation_quality(py_files, result)
     check_signal_tx_hash_dedup(py_files, sql_files, result)
+    check_test_open_hardcoded_paths(py_files, result)
 
     return result
+
+
+def check_test_open_hardcoded_paths(py_files: List[str], result: AuditResult):
+    """
+    Detect test files that use open() with hardcoded relative paths like
+    open("services/foo.py") or open("migrations/001.sql") instead of
+    os.path.join(os.path.dirname(__file__), ...).
+
+    Such paths break when pytest runs from the project root rather than
+    the backend/ directory. The fix is always to use __file__-relative paths.
+    """
+    import re
+    # Match open("services/...") or open("migrations/...") but NOT open(os.path.join(...))
+    bad_pattern = re.compile(r'open\(\s*["\'](services|migrations|backend)/')
+    # Allowlist: files that are supposed to use these paths (e.g., audit_source itself)
+    allowlist = {"audit_source.py", "verify_deploy.py", "check_migration_status.py"}
+
+    for fpath in py_files:
+        fname = os.path.basename(fpath)
+        if fname in allowlist:
+            continue
+        # Only check test files
+        if "/tests/" not in fpath and "\\tests\\" not in fpath:
+            if not fname.startswith("test_"):
+                continue
+        try:
+            source = open(fpath).read()
+        except Exception:
+            continue
+        lines = source.split("\n")
+        for i, line in enumerate(lines, 1):
+            if bad_pattern.search(line):
+                result.add(Finding(
+                    pitfall="test-open-hardcoded-path",
+                    severity="minor",
+                    file=fpath,
+                    line=i,
+                    description=f"Test uses hardcoded relative path in open(): {line.strip()}",
+                    suggestion="Use os.path.join(os.path.dirname(__file__), '..', 'services', 'foo.py') instead",
+                ))
+
+    # If no findings, report pass
+    if not any(f.pitfall == "test-open-hardcoded-path" for f in result.findings):
+        result.add_pass("No test files use hardcoded relative paths in open()")
 
 
 def check_signal_tx_hash_dedup(py_files: List[str], sql_files: List[str], result: AuditResult):
