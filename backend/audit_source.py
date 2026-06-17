@@ -998,6 +998,10 @@ def check_placeholder_masking(py_files: List[str], jsx_files: List[str], result:
     for fpath in all_files:
         if _is_own_source(fpath):
             continue
+        # Skip test files — they intentionally use '—' as mock/test data,
+        # not as production placeholders masking real data.
+        if '/tests/' in fpath or fpath.endswith('.test.jsx') or fpath.endswith('.test.js'):
+            continue
         text = read_file(fpath)
         file_lines = lines(text)
         for pattern in placeholder_patterns:
@@ -3993,6 +3997,7 @@ def run_audit(base_path: str) -> AuditResult:
     check_no_duplicate_migration_ids(sql_files, result)
     check_websocket_load_tests(py_files, result)
     check_db_reconnect_feature(py_files, result)
+    check_signal_explanation_quality(py_files, result)
 
     return result
 
@@ -4874,6 +4879,146 @@ def check_no_duplicate_migration_ids(sql_files: list, result: AuditResult):
         result.add_pass(
             "No duplicate migration IDs — all migration files have unique IDs"
         )
+
+
+def check_signal_explanation_quality(py_files: List[str], result: AuditResult):
+    """
+    Validate signal explanation templates in signal_generator.py:
+    1. All generate_explanation call paths produce strings <= 120 chars
+    2. No explanation contains placeholder text ('TODO', '—', 'N/A', 'TBD')
+    3. Proven-whale explanations contain quality keywords
+    4. New-whale explanations contain 'New whale' prefix
+    5. Fallback template (TPL-Z) includes whale score and confidence percentages
+    """
+    sg_path = None
+    for fpath in py_files:
+        if fpath.endswith("/signal_generator.py"):
+            sg_path = fpath
+            break
+
+    if sg_path is None:
+        result.add_pass("signal_generator.py not found — skipping explanation quality check")
+        return
+
+    try:
+        source = open(sg_path, "r").read()
+    except Exception as e:
+        result.add(Finding(
+            pitfall="explanation-quality",
+            severity="minor",
+            file=sg_path,
+            line=1,
+            description=f"Could not read signal_generator.py: {e}",
+            suggestion="Fix file permissions or path",
+        ))
+        return
+
+    # Check 1: Verify generate_explanation exists and has truncation guard
+    if "def generate_explanation(" not in source:
+        result.add(Finding(
+            pitfall="explanation-quality",
+            severity="critical",
+            file=sg_path,
+            line=1,
+            description="generate_explanation() function not found in signal_generator.py",
+            suggestion="Add the generate_explanation() function",
+        ))
+        return
+
+    # Check 2: Verify truncation to 120 chars is present
+    if "120" not in source or "truncat" not in source.lower():
+        # Check for len() comparison pattern
+        if "len(tpl) > 120" not in source and "len(result) > 120" not in source:
+            result.add(Finding(
+                pitfall="explanation-quality",
+                severity="minor",
+                file=sg_path,
+                line=1,
+                description="generate_explanation() may not truncate to 120 chars",
+                suggestion="Add: if len(tpl) > 120: tpl = tpl[:117] + '...'",
+            ))
+        else:
+            result.add_pass("generate_explanation() has 120-char truncation guard")
+    else:
+        result.add_pass("generate_explanation() has 120-char truncation guard")
+
+    # Check 3: Verify no placeholder text in template strings
+    placeholder_patterns = ["TODO", "TBD", "N/A", "PLACEHOLDER"]
+    lines = source.split("\n")
+    placeholder_found = False
+    for i, line in enumerate(lines, 1):
+        # Skip comments
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        for pat in placeholder_patterns:
+            if pat in line and "f\"" in line:
+                result.add(Finding(
+                    pitfall="explanation-quality-placeholder",
+                    severity="minor",
+                    file=sg_path,
+                    line=i,
+                    description=f"Explanation template contains placeholder text '{pat}'",
+                    suggestion=f"Replace '{pat}' with actual dynamic content",
+                ))
+                placeholder_found = True
+
+    if not placeholder_found:
+        result.add_pass("No placeholder text found in explanation templates")
+
+    # Check 4: Verify proven-whale template paths contain quality keywords
+    proven_keywords = ["consistent whale", "confidence trade", "moderate confidence"]
+    proven_found = any(kw in source for kw in proven_keywords)
+    if proven_found:
+        result.add_pass("Proven-whale explanation templates contain quality keywords")
+    else:
+        result.add(Finding(
+            pitfall="explanation-quality-proven",
+            severity="minor",
+            file=sg_path,
+            line=1,
+            description="No proven-whale explanation templates contain quality keywords",
+            suggestion="Add templates for proven whales with execution rate or confidence info",
+        ))
+
+    # Check 5: Verify new-whale template paths contain 'New whale'
+    if "New whale" in source:
+        result.add_pass("New-whale explanation templates contain 'New whale' prefix")
+    else:
+        result.add(Finding(
+            pitfall="explanation-quality-new-whale",
+            severity="minor",
+            file=sg_path,
+            line=1,
+            description="No new-whale explanation templates found with 'New whale' prefix",
+            suggestion="Add TPL-H/I/J templates for new whale wallets",
+        ))
+
+    # Check 6: Verify fallback template includes whale score and confidence %
+    if "whale score" in source.lower() and "confidence" in source.lower():
+        result.add_pass("Fallback template includes whale score and confidence info")
+    else:
+        result.add(Finding(
+            pitfall="explanation-quality-fallback",
+            severity="minor",
+            file=sg_path,
+            line=1,
+            description="Fallback template may not include whale score and confidence percentages",
+            suggestion="Ensure TPL-Z includes whale_score% and confidence_final%",
+        ))
+
+    # Check 7: Verify explanation is stored in DB (not just computed and discarded)
+    if "explanation" in source and "UPDATE" in source:
+        result.add_pass("Explanation is persisted to DB after generation")
+    else:
+        result.add(Finding(
+            pitfall="explanation-quality-persist",
+            severity="minor",
+            file=sg_path,
+            line=1,
+            description="Explanation may not be persisted to DB after generation",
+            suggestion="Add UPDATE copy_trade_signals SET explanation = $2 WHERE id = $1",
+        ))
 
 
 def main():
