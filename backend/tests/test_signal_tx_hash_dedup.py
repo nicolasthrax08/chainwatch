@@ -110,33 +110,37 @@ class TestMigration021SQL:
     def test_migration_file_exists(self):
         """Migration 021 should exist in the migrations directory."""
         import os
-        migration_path = "migrations/021_add_tx_hash_to_signals.sql"
+        migration_path = os.path.join(os.path.dirname(__file__), "..", "migrations", "021_add_tx_hash_to_signals.sql")
         assert os.path.exists(migration_path), f"Migration file not found: {migration_path}"
 
     def test_migration_adds_column(self):
         """Migration should add tx_hash column."""
-        with open("migrations/021_add_tx_hash_to_signals.sql") as f:
+        import os
+        with open(os.path.join(os.path.dirname(__file__), "..", "migrations", "021_add_tx_hash_to_signals.sql")) as f:
             sql = f.read()
         assert "ADD COLUMN IF NOT EXISTS tx_hash" in sql
         assert "TEXT" in sql
 
     def test_migration_adds_index(self):
         """Migration should add index on tx_hash."""
-        with open("migrations/021_add_tx_hash_to_signals.sql") as f:
+        import os
+        with open(os.path.join(os.path.dirname(__file__), "..", "migrations", "021_add_tx_hash_to_signals.sql")) as f:
             sql = f.read()
         assert "idx_copy_trade_signals_tx_hash" in sql
         assert "CREATE INDEX" in sql
 
     def test_migration_adds_unique_constraint(self):
         """Migration should add unique constraint on (wallet_id, tx_hash)."""
-        with open("migrations/021_add_tx_hash_to_signals.sql") as f:
+        import os
+        with open(os.path.join(os.path.dirname(__file__), "..", "migrations", "021_add_tx_hash_to_signals.sql")) as f:
             sql = f.read()
         assert "uq_copy_trade_signals_wallet_tx" in sql
         assert "UNIQUE (wallet_id, tx_hash)" in sql
 
     def test_migration_uses_idempotent_syntax(self):
         """Migration should use IF NOT EXISTS for idempotency."""
-        with open("migrations/021_add_tx_hash_to_signals.sql") as f:
+        import os
+        with open(os.path.join(os.path.dirname(__file__), "..", "migrations", "021_add_tx_hash_to_signals.sql")) as f:
             sql = f.read()
         assert "IF NOT EXISTS" in sql
 
@@ -146,7 +150,8 @@ class TestSignalGeneratorTxHash:
 
     def test_insert_includes_tx_hash(self):
         """INSERT statement should include tx_hash column."""
-        with open("services/signal_generator.py") as f:
+        import os
+        with open(os.path.join(os.path.dirname(__file__), "..", "services", "signal_generator.py")) as f:
             src = f.read()
         assert "tx_hash" in src
         # Check INSERT block
@@ -157,12 +162,14 @@ class TestSignalGeneratorTxHash:
 
     def test_dedup_check_exists(self):
         """signal_generator should check tx_hash for dedup."""
-        with open("services/signal_generator.py") as f:
+        import os
+        with open(os.path.join(os.path.dirname(__file__), "..", "services", "signal_generator.py")) as f:
             src = f.read()
         assert "wallet_id = $1 AND tx_hash = $2" in src
 
     def test_tx_hash_in_signal_dict(self):
         """signal_dict should include tx_hash for WS push."""
-        with open("services/signal_generator.py") as f:
+        import os
+        with open(os.path.join(os.path.dirname(__file__), "..", "services", "signal_generator.py")) as f:
             src = f.read()
         assert 'signal_dict["tx_hash"]' in src or "signal_dict['tx_hash']" in src
