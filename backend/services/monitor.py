@@ -621,6 +621,7 @@ async def _poll_all_wallets_inner() -> None:
                             "score_at_generation": float(signal.get("score_at_generation", 0)),
                             "explanation": signal.get("explanation"),
                             "explanation_stale": signal.get("explanation_stale", False),
+                            "tx_hash": signal.get("tx_hash"),
                         },
                     }))
 

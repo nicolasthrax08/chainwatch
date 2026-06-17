@@ -152,7 +152,7 @@ def check_on_conflict_has_constraint(py_files: List[str], sql_files: List[str], 
 
     for fpath in py_files:
         # Skip tool files that contain SQL DDL strings with ON CONFLICT
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         file_lines = lines(text)
@@ -383,8 +383,17 @@ def check_columns_exist_in_schema(py_files: List[str], sql_files: List[str], res
 
 def _is_own_source(fpath: str) -> bool:
     """Check if fpath is a utility/tool file that contains DDL/SQL strings
-    (skip self-referential ON CONFLICT and schema checks)."""
-    return fpath.endswith(("audit_source.py", "check_migration_status.py"))
+    or endpoint/field definitions (skip self-referential checks).
+
+    Covers: audit_source.py, check_migration_status.py, field_contract.py.
+    Also matches any *_source.py to exclude test_audit_source.py and
+    future tool modules that embed search strings for self-checks.
+    """
+    basename = fpath.rsplit("/", 1)[-1] if "/" in fpath else fpath
+    return (
+        basename.endswith(("_source.py", "check_migration_status.py"))
+        or basename == "field_contract.py"
+    )
 
 
 def check_try_except_imports(py_files: List[str], result: AuditResult):
@@ -1682,7 +1691,7 @@ def check_on_conflict_exact_column_match(py_files, sql_files, result):
     )
 
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         file_lines = lines(text)
@@ -1776,7 +1785,7 @@ def check_get_current_user_no_db(py_files: List[str], result: AuditResult):
     """
     found_function = False
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         if "get_current_user" not in text:
@@ -1876,7 +1885,7 @@ def check_phase_isolation_monitor(py_files: List[str], result: AuditResult):
     runs inside the same DB transaction as the wallet UPDATE phase.
     """
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         # Only check files that look like monitor workers
@@ -1946,7 +1955,7 @@ def check_balance_vs_event_amount(py_files: List[str], result: AuditResult):
     without a separate tx_amount_native field.
     """
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         if "balance_native" not in text:
@@ -1999,7 +2008,7 @@ def check_db_conn_held_across_http(py_files: List[str], result: AuditResult):
     making external HTTP calls (fetch-then-store loops).
     """
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         if "async with" not in text:
@@ -2213,7 +2222,7 @@ def check_dead_variable_cascade(py_files: List[str], result: AuditResult):
     but never used in any return value or output — dead code.
     """
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         file_lines = lines(text)
@@ -2278,7 +2287,7 @@ def check_pyright_builtin_generics(py_files: List[str], result: AuditResult):
     without corresponding imports, which can cause Pyright errors.
     """
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         file_lines = lines(text)
@@ -2320,7 +2329,7 @@ def check_coingecko_response_shape(py_files: List[str], result: AuditResult):
     a top-level currency key instead of per-coin objects.
     """
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         if "simple/price" not in text and "coingecko" not in text.lower():
@@ -2365,7 +2374,7 @@ def check_whale_score_threshold(py_files: List[str], result: AuditResult):
     found_score_check = False
 
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         fname = os.path.basename(fpath)
@@ -2419,7 +2428,7 @@ def check_stale_price_cache_drift(py_files: List[str], result: AuditResult):
     has_price_age_check = False
 
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         fname = os.path.basename(fpath)
@@ -2472,7 +2481,7 @@ def check_whale_score_in_dashboard(
     # Check that backend returns whale_score in dashboard endpoint
     backend_returns_whale_score = False
     for fpath in py_files:
-        if fpath.endswith(("_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         if "whale_score" in text and "dashboard" in text.lower():
@@ -2644,7 +2653,7 @@ def check_get_me_jwt_created_at(py_files: List[str], result: AuditResult):
     at token creation time, avoiding a DB SELECT on every /api/auth/me call.
     """
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         if "def get_me" not in text:
@@ -2709,7 +2718,7 @@ def check_alpaca_validation_before_db(py_files: List[str], result: AuditResult):
     )
 
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         if "connect_alpaca" not in text:
@@ -2839,7 +2848,7 @@ def check_mirror_trade_action_normalization(py_files: List[str], result: AuditRe
     )
 
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         if "mirror_trade" not in text and "/api/signals" not in text:
@@ -2899,7 +2908,7 @@ def check_mirror_trade_action_normalization(py_files: List[str], result: AuditRe
 
     # If we never found mirror_trade in any file, report pass
     if not any("mirror_trade" in read_file(f) for f in py_files
-               if not f.endswith(("audit_source.py", "check_migration_status.py"))):
+               if not _is_own_source(f)):
         result.add_pass("mirror_trade action normalization — no mirror_trade found (check not applicable)")
 
 
@@ -2913,7 +2922,7 @@ def check_mirror_trade_status_guard(py_files: List[str], result: AuditResult):
     sent to Alpaca again if called concurrently.
     """
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         # Only check main.py — the file that defines the mirror_trade endpoint.
         # monitor.py, test files, and other modules reference 'mirror_trade' in
@@ -2983,7 +2992,7 @@ def check_mirror_trade_action_guard(py_files: List[str], result: AuditResult):
     it will be sent to Alpaca as a short sell — which is likely unintended.
     """
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         if "mirror_trade" not in text:
@@ -3046,7 +3055,7 @@ def check_mirror_trade_response_validation(py_files: List[str], result: AuditRes
     even though no order was placed.
     """
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         if "mirror_trade" not in text:
@@ -3101,7 +3110,7 @@ def check_mirror_trade_price_status_check(py_files: List[str], result: AuditResu
     path checks status_code before parsing JSON.
     """
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         if "mirror_trade" not in text:
@@ -3156,7 +3165,7 @@ def check_portfolio_change_delta_consistency(py_files: List[str], result: AuditR
     See: dual-agent pitfall — portfolio_change delta mismatch.
     """
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         file_lines = lines(text)
@@ -3271,7 +3280,7 @@ def check_alert_fired_dict_notify_telegram(py_files: List[str], result: AuditRes
     for fpath in py_files:
         if not fpath.endswith("alert_evaluator.py"):
             continue
-        if fpath.endswith("audit_source.py"):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         file_lines = lines(text)
@@ -3364,7 +3373,7 @@ def check_endpoint_response_field_consistency(py_files: List[str], jsx_files: Li
     dashboard_wallet_fields: Set[str] = set()
 
     for fpath in py_files:
-        if fpath.endswith(("audit_source.py", "check_migration_status.py")):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         file_lines = lines(text)
@@ -3545,7 +3554,7 @@ def check_closed_at_on_status_transition(py_files: List[str], result: AuditResul
     found_any = False
 
     for fpath in py_files:
-        if fpath.endswith("audit_source.py"):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         file_lines = lines(text)
@@ -3621,7 +3630,7 @@ def check_stale_signal_expiry(py_files: List[str], result: AuditResult):
     found_stale_closed_at = False
 
     for fpath in py_files:
-        if fpath.endswith("audit_source.py"):
+        if _is_own_source(fpath):
             continue
         text = read_file(fpath)
         file_lines = lines(text)
@@ -3823,7 +3832,7 @@ def check_duplicate_cycle_stats(py_files: List[str], result: AuditResult):
     """
     for fpath in py_files:
         # Skip the audit tool itself (it contains the search string in check code)
-        if fpath.endswith("audit_source.py"):
+        if _is_own_source(fpath):
             continue
         src = read_file(fpath)
         if not src:
@@ -4005,8 +4014,114 @@ def run_audit(base_path: str) -> AuditResult:
     check_websocket_load_tests(py_files, result)
     check_db_reconnect_feature(py_files, result)
     check_signal_explanation_quality(py_files, result)
+    check_signal_tx_hash_dedup(py_files, sql_files, result)
 
     return result
+
+
+def check_signal_tx_hash_dedup(py_files: List[str], sql_files: List[str], result: AuditResult):
+    """
+    Verify that signal_generator.py stores tx_hash on INSERT and checks it
+    for deduplication. Without tx_hash, the same on-chain transaction can
+    generate duplicate signals across monitor cycles, and there is no
+    audit trail linking signals to specific on-chain transactions.
+
+    Checks:
+    1. signal_generator.py INSERT includes tx_hash column
+    2. signal_generator.py checks tx_hash for dedup before INSERT
+    3. Migration 021 adds tx_hash column to copy_trade_signals
+    4. Migration 021 adds unique constraint on (wallet_id, tx_hash)
+    """
+    # Check 1: INSERT includes tx_hash
+    sg_path = None
+    for fpath in py_files:
+        if fpath.endswith("signal_generator.py"):
+            sg_path = fpath
+            break
+
+    if sg_path is None:
+        result.add(Finding(
+            pitfall="signal-tx-hash-dedup",
+            severity="critical",
+            file="signal_generator.py",
+            line=0,
+            description="signal_generator.py not found — cannot verify tx_hash dedup",
+            suggestion="Ensure signal_generator.py exists in services/",
+        ))
+        return
+
+    sg_text = read_file(sg_path)
+
+    # Check INSERT includes tx_hash
+    if "tx_hash" not in sg_text:
+        result.add(Finding(
+            pitfall="signal-tx-hash-dedup",
+            severity="critical",
+            file=sg_path,
+            line=0,
+            description="signal_generator.py does not reference tx_hash — signals have no on-chain tx audit trail",
+            suggestion="Add tx_hash column to INSERT and use it for dedup",
+        ))
+        return
+
+    # Check 2: tx_hash is in the INSERT statement
+    if "INSERT INTO copy_trade_signals" in sg_text:
+        # Find the INSERT block and check for tx_hash
+        insert_idx = sg_text.find("INSERT INTO copy_trade_signals")
+        insert_block = sg_text[insert_idx:insert_idx + 500]
+        if "tx_hash" not in insert_block:
+            result.add(Finding(
+                pitfall="signal-tx-hash-dedup",
+                severity="critical",
+                file=sg_path,
+                line=sg_text[:insert_idx].count("\n") + 1,
+                description="INSERT INTO copy_trade_signals does not include tx_hash column",
+                suggestion="Add tx_hash to the INSERT column list and VALUES",
+            ))
+            return
+
+    # Check 3: tx_hash dedup check exists
+    if "wallet_id = $1 AND tx_hash = $2" not in sg_text:
+        result.add(Finding(
+            pitfall="signal-tx-hash-dedup",
+            severity="moderate",
+            file=sg_path,
+            line=0,
+            description="signal_generator.py does not check tx_hash for deduplication",
+            suggestion="Add a SELECT check for existing (wallet_id, tx_hash) before INSERT",
+        ))
+        return
+
+    # Check 4: Migration 021 exists with tx_hash column
+    migration_found = False
+    for fpath in sql_files:
+        if "021" in fpath and "tx_hash" in fpath:
+            migration_found = True
+            mtext = read_file(fpath)
+            if "ADD COLUMN IF NOT EXISTS tx_hash" not in mtext:
+                result.add(Finding(
+                    pitfall="signal-tx-hash-dedup",
+                    severity="moderate",
+                    file=fpath,
+                    line=0,
+                    description="Migration 021 exists but does not add tx_hash column",
+                    suggestion="Add ALTER TABLE ... ADD COLUMN IF NOT EXISTS tx_hash TEXT",
+                ))
+                return
+            break
+
+    if not migration_found:
+        result.add(Finding(
+            pitfall="signal-tx-hash-dedup",
+            severity="moderate",
+            file="migrations/",
+            line=0,
+            description="Migration 021 (tx_hash) not found in migrations directory",
+            suggestion="Create migration 021_add_tx_hash_to_signals.sql",
+        ))
+        return
+
+    result.add_pass("Pitfall: Signal tx_hash dedup — signal_generator stores tx_hash, checks for dedup, migration exists")
 
 
 def check_db_reconnect_feature(py_files: List[str], result: AuditResult):
@@ -4187,7 +4302,7 @@ def check_whale_sentiment_buy_inflow(py_files: List[str], result: AuditResult):
         text = read_file(fpath)
         if "whale_sentiment" not in text and "whale-sentiment" not in text:
             continue
-        if fpath.endswith("audit_source.py") or fpath.endswith("field_contract.py"):
+        if _is_own_source(fpath):
             result.add_pass("whale_sentiment: buy txns counted as inflow")
             continue
         # Skip test files — they reference endpoint names but don't define the function

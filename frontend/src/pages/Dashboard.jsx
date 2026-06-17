@@ -214,7 +214,9 @@ function DashboardSignalStats({ token }) {
         { label: 'Avg Whale Score', value: `${avgWhaleScorePct}%`, color: '#c4b5fd' },
         { label: 'Pending', value: stats.by_status.pending, color: '#f59e0b' },
         { label: 'Executed', value: stats.by_status.executed, color: '#10b981' },
+        { label: 'Failed', value: stats.by_status.failed, color: '#ef4444' },
         { label: 'Signals (7d)', value: stats.recent_signals.last_7d, color: '#6b7280' },
+        { label: 'Avg Time to Execute', value: stats.avg_time_to_execute_seconds > 0 ? fmtDuration(stats.avg_time_to_execute_seconds) : '—', color: '#8b5cf6' },
       ].map(({ label, value, color }) => (
         <div key={label} style={{
           background: '#13141a',

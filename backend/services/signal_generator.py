@@ -205,7 +205,7 @@ async def evaluate_for_signal(
         is_whale: pre-resolved from Phase 1 data (avoids redundant SELECT)
         user_id: pre-resolved from Phase 1 data
         chain: chain code (eth/sol/btc)
-        tx_hash: the new transaction hash
+        tx_hash: the new transaction hash (used for dedup + audit trail)
         tx_type: transaction type from tx_fetcher (buy/receive/send/...)
         token: token symbol from tx_fetcher
         tx_amount_native: the actual transaction amount in native units
@@ -256,6 +256,16 @@ async def evaluate_for_signal(
     if _is_dup:
         return None
 
+    # Dedup: skip if this exact tx_hash was already processed for this wallet
+    # (migration 021 adds tx_hash column + unique constraint)
+    if tx_hash:
+        existing_tx = await conn.fetchval(
+            "SELECT id FROM copy_trade_signals WHERE wallet_id = $1 AND tx_hash = $2",
+            wallet_id, tx_hash,
+        )
+        if existing_tx:
+            return None
+
     existing = await conn.fetchval(
         """
         SELECT id FROM copy_trade_signals
@@ -278,14 +288,14 @@ async def evaluate_for_signal(
         """
         INSERT INTO copy_trade_signals
             (wallet_id, token_symbol, action, amount_usd, confidence_score,
-             confidence_final, score_at_generation, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+             confidence_final, score_at_generation, status, tx_hash)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
         ON CONFLICT (wallet_id, token_symbol, action, amount_usd) DO NOTHING
         RETURNING id, wallet_id, token_symbol, action, amount_usd,
                   confidence_score, confidence_final, status, created_at
         """,
         wallet_id, token_symbol, tx_type, round(amount_usd, 2), confidence,
-        c_final, whale_score,
+        c_final, whale_score, tx_hash,
     )
 
     if signal:
@@ -297,6 +307,7 @@ async def evaluate_for_signal(
         signal_dict["wallet_address"] = wallet_address
         signal_dict["confidence_final"] = c_final
         signal_dict["execution_rate_30d"] = execution_rate_30d
+        signal_dict["tx_hash"] = tx_hash
 
         # ── Generate explanation text ─────────────────────────────────
         explanation = generate_explanation(
