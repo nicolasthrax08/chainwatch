@@ -492,32 +492,35 @@ async def _poll_all_wallets_inner() -> None:
             except Exception as e:
                 logger.error(f"Alert evaluation failed: {e}", exc_info=True)
 
-        # 6b: Signal generation (one tx per wallet for isolation)
-        # Collect all WS pushes during the loop, then push after the loop
-        # to avoid overwriting signals from earlier wallets (CRITICAL-1 fix).
+        # 6b: Signal generation (batched — single DB connection for all wallets)
+        # BATCH FIX: Acquire one connection for the entire loop instead of
+        # per-wallet connections. This prevents pool exhaustion when many
+        # wallets change in one cycle (previously N connections → now 1).
+        # Each wallet is still wrapped in per-wallet try/except so one
+        # failure doesn't block others.
         ws_pushes: list = []  # list of (user_id, payload) tuples
-        for wid, addr, w_label, chain, is_whale, is_mine_flag, uid, (
-            bal_native, bal_usd, tx_hash, tx_type, token, tx_amount_native
-        ) in changed_wallets:
-            if not tx_hash:
-                continue  # Only wallets w/ new tx get signals
+        async with _pool.acquire() as conn:
+            for wid, addr, w_label, chain, is_whale, is_mine_flag, uid, (
+                bal_native, bal_usd, tx_hash, tx_type, token, tx_amount_native
+            ) in changed_wallets:
+                if not tx_hash:
+                    continue  # Only wallets w/ new tx get signals
 
-            try:
-                from services.signal_generator import evaluate_for_signal
-                from services.whale_scorer import score_whale_wallet
+                try:
+                    from services.signal_generator import evaluate_for_signal
+                    from services.whale_scorer import score_whale_wallet
 
-                symbol = chain.upper()
-                # Use $1.0 for stablecoins instead of chain-native price
-                # (e.g., ETH $2500 would inflate USDC tx USD value by 2500x)
-                if token.upper() in _STABLECOINS:
-                    price_for_signal = 1.0
-                else:
-                    price_for_signal = _price_cache.get(
-                        token,
-                        _price_cache.get(symbol, 0.0),
-                    )
+                    symbol = chain.upper()
+                    # Use $1.0 for stablecoins instead of chain-native price
+                    # (e.g., ETH $2500 would inflate USDC tx USD value by 2500x)
+                    if token.upper() in _STABLECOINS:
+                        price_for_signal = 1.0
+                    else:
+                        price_for_signal = _price_cache.get(
+                            token,
+                            _price_cache.get(symbol, 0.0),
+                        )
 
-                async with _pool.acquire() as conn:
                     # ── Score the whale wallet (before signal generation) ──
                     score_data = {
                         "score": 0.0,
@@ -596,40 +599,40 @@ async def _poll_all_wallets_inner() -> None:
                             score_data["execution_rate_30d"],
                         )
 
-                if signal:
-                    # CRITICAL-1 FIX: Append to list instead of overwriting
-                    # a single variable. This ensures all signals from a poll
-                    # cycle get their WS push, not just the last one.
-                    ws_pushes.append((uid, {
-                        "type": "signal",
-                        "action": "created",
-                        "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
-                        "payload": {
-                            "id": str(signal["id"]),
-                            "wallet_id": str(signal["wallet_id"]),
-                            "wallet_address": addr,
-                            "wallet_label": signal.get("wallet_label"),
-                            "chain": chain,
-                            "token_symbol": signal["token_symbol"],
-                            "action": signal["action"],
-                            "amount_usd": float(signal["amount_usd"]),
-                            "confidence_score": float(signal["confidence_score"]),
-                            "confidence_final": float(signal.get("confidence_final", 0)),
-                            "status": signal["status"],
-                            "created_at": signal["created_at"].isoformat(),
-                            "whale_score": float(signal.get("whale_score", score_data["score"])),
-                            "score_at_generation": float(signal.get("score_at_generation", 0)),
-                            "explanation": signal.get("explanation"),
-                            "explanation_stale": signal.get("explanation_stale", False),
-                            "tx_hash": signal.get("tx_hash"),
-                        },
-                    }))
+                    if signal:
+                        # CRITICAL-1 FIX: Append to list instead of overwriting
+                        # a single variable. This ensures all signals from a poll
+                        # cycle get their WS push, not just the last one.
+                        ws_pushes.append((uid, {
+                            "type": "signal",
+                            "action": "created",
+                            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+                            "payload": {
+                                "id": str(signal["id"]),
+                                "wallet_id": str(signal["wallet_id"]),
+                                "wallet_address": addr,
+                                "wallet_label": signal.get("wallet_label"),
+                                "chain": chain,
+                                "token_symbol": signal["token_symbol"],
+                                "action": signal["action"],
+                                "amount_usd": float(signal["amount_usd"]),
+                                "confidence_score": float(signal["confidence_score"]),
+                                "confidence_final": float(signal.get("confidence_final", 0)),
+                                "status": signal["status"],
+                                "created_at": signal["created_at"].isoformat(),
+                                "whale_score": float(signal.get("whale_score", score_data["score"])),
+                                "score_at_generation": float(signal.get("score_at_generation", 0)),
+                                "explanation": signal.get("explanation"),
+                                "explanation_stale": signal.get("explanation_stale", False),
+                                "tx_hash": signal.get("tx_hash"),
+                            },
+                        }))
 
-            except Exception as e:
-                logger.error(
-                    f"Signal evaluation failed for wallet {wid}: {e}",
-                    exc_info=True,
-                )
+                except Exception as e:
+                    logger.error(
+                        f"Signal evaluation failed for wallet {wid}: {e}",
+                        exc_info=True,
+                    )
 
         # ── Phase 6c: WebSocket pushes (outside DB connection block) ───────
         # Pitfall #7 fix: WS push I/O must not hold a DB connection.
