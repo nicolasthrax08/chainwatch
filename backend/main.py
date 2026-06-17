@@ -3121,6 +3121,61 @@ async def health_metrics_endpoint():
     return JSONResponse(content=metrics, status_code=200)
 
 
+@app.get("/api/health/pool")
+async def health_pool_endpoint():
+    """
+    Expose current DB connection pool statistics.
+
+    Returns pool size, idle count, min/max configuration, and a
+    derived `used` count (size - idle).  When the pool has not been
+    created (e.g. startup failure) the endpoint returns
+    ``{"available": false}`` so callers can distinguish "no pool"
+    from "pool exhausted".
+
+    Operators and the cron job can use this to detect pool exhaustion
+    before it causes 503 errors on user-facing endpoints.
+    """
+    if db_pool is None:
+        return JSONResponse(
+            content={
+                "available": False,
+                "detail": "DB pool not created — startup handler failed or DB is reconnecting",
+            },
+            status_code=200,
+        )
+
+    try:
+        pool_size = db_pool.get_size()
+        pool_idle = db_pool.get_idle_size()
+        pool_min = db_pool.get_min_size()
+        pool_max = db_pool.get_max_size()
+    except Exception as e:
+        return JSONResponse(
+            content={
+                "available": True,
+                "error": f"Failed to read pool stats: {e}",
+            },
+            status_code=200,
+        )
+
+    pool_used = pool_size - pool_idle
+    utilization = round(pool_used / max(pool_max, 1) * 100, 1)
+
+    return JSONResponse(
+        content={
+            "available": True,
+            "size": pool_size,
+            "idle": pool_idle,
+            "used": pool_used,
+            "min_size": pool_min,
+            "max_size": pool_max,
+            "utilization_pct": utilization,
+            "healthy": pool_used < pool_max,
+        },
+        status_code=200,
+    )
+
+
 @app.get("/api/health/diagnostic")
 async def health_diagnostic():
     """
