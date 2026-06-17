@@ -88,7 +88,7 @@ function Alerts({ token, currency }) {
       setForm({ rule_type: '', threshold: 0, enabled: true, notify_telegram: true });
       load();
     } catch (e) {
-      alert(e.message);
+      window.alert(e.message);
     }
   };
 
@@ -104,19 +104,19 @@ function Alerts({ token, currency }) {
       });
       load();
     } catch (e) {
-      alert(e.message);
+      window.alert(e.message);
     } finally {
       setTogglingIds(prev => { const n = new Set(prev); n.delete(alert.id); return n; });
     }
   };
 
   const handleDelete = async (id) => {
-    if (!confirm('Delete this alert?')) return;
+    if (!window.confirm('Delete this alert?')) return;
     try {
       await apiFetch(`/alerts/${id}`, token, { method: 'DELETE' });
       load();
     } catch (e) {
-      alert(e.message);
+      window.alert(e.message);
     }
   };
 

@@ -102,6 +102,28 @@ def lines(text: str) -> List[str]:
     return text.splitlines()
 
 
+def _is_test_file(fpath: str) -> bool:
+    """Return True if *fpath* is a test file that should be skipped by audit checks.
+
+    Centralises the test-file exclusion logic so every check uses the same
+    definition.  Recognises:
+
+    • Python files under a ``tests/`` directory or ending in ``_test.py`` / ``_tests.py``
+    • Frontend files under a ``tests/`` directory or ending in ``.test.js`` / ``.test.jsx``
+    • ``conftest.py`` (pytest fixtures – never production code)
+    """
+    fpath_norm = fpath.replace("\\", "/")
+    fpath_parts = fpath_norm.split("/")
+    basename = fpath_parts[-1]
+    if "tests" in fpath_parts:
+        return True
+    if basename == "conftest.py":
+        return True
+    if basename.endswith(("_test.py", "_tests.py", ".test.js", ".test.jsx")):
+        return True
+    return False
+
+
 def grep_pattern(text: str, pattern: str) -> List[Tuple[int, str]]:
     """Return (line_num, line_text) for each match."""
     results = []
@@ -435,13 +457,7 @@ def check_cache_initialized_nonzero(py_files: List[str], result: AuditResult):
     """
     for fpath in py_files:
         # Skip test files — they contain mock data, not real cache initialization
-        fpath_norm = fpath.replace("\\", "/")
-        fpath_parts = fpath_norm.split("/")
-        is_test_file = (
-            "tests" in fpath_parts
-            or fpath.endswith(("_test.py", "_tests.py"))
-        )
-        if is_test_file:
+        if _is_test_file(fpath):
             continue
         text = read_file(fpath)
         # Look for dict initializations with 0.0 values that look like price/rate caches
@@ -531,16 +547,7 @@ def check_start_monitor_wired(py_files: List[str], result: AuditResult):
     for fpath in py_files:
         # Skip test files — they call start_monitor() in test methods
         # but correctly have no @app.on_event('startup') decorator.
-        # Match "tests" or "test" as a path segment (e.g., .../tests/test_x.py),
-        # but NOT substrings like /tmp/pytest-of-hermes/... or /tmp/pytest-0/test_xxx/
-        # which are pytest temp dirs, not project test files.
-        fpath_norm = fpath.replace("\\", "/")
-        fpath_parts = fpath_norm.split("/")
-        is_test_file = (
-            "tests" in fpath_parts
-            or fpath.endswith(("_test.py", "_tests.py"))
-        )
-        if is_test_file:
+        if _is_test_file(fpath):
             continue
         text = read_file(fpath)
         if "start_monitor" not in text:
@@ -1000,7 +1007,7 @@ def check_placeholder_masking(py_files: List[str], jsx_files: List[str], result:
             continue
         # Skip test files — they intentionally use '—' as mock/test data,
         # not as production placeholders masking real data.
-        if '/tests/' in fpath or fpath.endswith('.test.jsx') or fpath.endswith('.test.js'):
+        if _is_test_file(fpath):
             continue
         text = read_file(fpath)
         file_lines = lines(text)
@@ -4184,9 +4191,7 @@ def check_whale_sentiment_buy_inflow(py_files: List[str], result: AuditResult):
             result.add_pass("whale_sentiment: buy txns counted as inflow")
             continue
         # Skip test files — they reference endpoint names but don't define the function
-        if (fpath.endswith("test_main_endpoints.py") or fpath.endswith("conftest.py")
-                or fpath.endswith("test_whale_sentiment_history.py")
-                or fpath.endswith("verify_deploy.py")):
+        if _is_test_file(fpath) or fpath.endswith("verify_deploy.py"):
             result.add_pass("whale_sentiment: buy txns counted as inflow")
             continue
 
@@ -4238,8 +4243,7 @@ def check_signal_stats_field_contract(py_files: List[str], result: AuditResult):
             result.add_pass("signal_stats: field contract includes all frontend-accessed fields")
             continue
         # Skip test files — they reference field names in mock data, not the actual endpoint
-        if (fpath.endswith("test_signal_stats.py") or fpath.endswith("test_main_endpoints.py")
-                or fpath.endswith("conftest.py") or fpath.endswith("verify_deploy.py")):
+        if _is_test_file(fpath) or fpath.endswith("verify_deploy.py"):
             result.add_pass("signal_stats: field contract includes all frontend-accessed fields")
             continue
 

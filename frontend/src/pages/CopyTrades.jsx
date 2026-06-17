@@ -477,7 +477,7 @@ function CopyTrades({ token, currency }) {
       await apiFetch(`/signals/${signalId}/mirror`, token, { method: 'POST' });
       load();
     } catch (e) {
-      alert(`Mirror trade failed: ${e.message}`);
+      window.alert(`Mirror trade failed: ${e.message}`);
     } finally {
       setMirroring(null);
     }

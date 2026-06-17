@@ -170,7 +170,7 @@ function Wallets({ token, currency }) {
       setShowAdd(false);
       load();
     } catch (e) {
-      alert(e.message);
+      window.alert(e.message);
     }
   };
 
@@ -180,7 +180,7 @@ function Wallets({ token, currency }) {
       await apiFetch(`/wallets/${id}`, token, { method: 'DELETE' });
       load();
     } catch (e) {
-      alert(e.message);
+      window.alert(e.message);
     }
   };
 
@@ -189,7 +189,7 @@ function Wallets({ token, currency }) {
       await apiFetch(`/wallets/${id}/refresh`, token, { method: 'POST' });
       load();
     } catch (e) {
-      alert(e.message);
+      window.alert(e.message);
     }
   };
 
@@ -201,7 +201,7 @@ function Wallets({ token, currency }) {
       const data = await apiFetch(`/wallets/${w.id}/score`, token);
       setScoreData(data);
     } catch (e) {
-      alert(`Failed to load score: ${e.message}`);
+      window.alert(`Failed to load score: ${e.message}`);
       setScoreModal(null);
     } finally {
       setScoreLoading(false);
