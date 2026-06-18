@@ -40,6 +40,14 @@ MAX_CONSECUTIVE_ERRORS = 5    # skip wallet after this many consecutive errors
 WALLET_FETCH_TIMEOUT = 25     # hard timeout per wallet (seconds)
 MAX_CONCURRENT_WALLETS = 5    # semaphore cap for concurrent on-chain fetches
 
+# ── Pool Health Monitoring ────────────────────────────────────────────
+# Warn when DB pool utilization exceeds this threshold (percentage).
+# At 100% the pool is exhausted and new requests will block/fail.
+POOL_HEALTH_WARN_THRESHOLD_PCT = 80.0
+# Log pool stats every N poll cycles even when healthy (for trend visibility)
+POOL_HEALTH_LOG_INTERVAL_CYCLES = 5
+_pool_health_cycle_counter: int = 0
+
 # ── Signal Stale Expiry ───────────────────────────────────────────────
 # Signals that remain 'pending' beyond this threshold are auto-expired
 # to 'stale' status. This prevents signals from living forever when
@@ -681,6 +689,44 @@ async def _poll_all_wallets_inner() -> None:
             logger.warning("Phase 7: Stale signal expiry failed: %s", e, exc_info=True)
     _phase_durations["phase7_stale_expiry"] = round(_time_mod.monotonic() - _phase_t0, 3)
 
+    # ── Phase 8: Pool health check ──────────────────────────────────────
+    _phase_t0 = _time_mod.monotonic()
+    global _pool_health_cycle_counter
+    _pool_health_cycle_counter += 1
+    _pool_stats_this_cycle = None
+    if _pool is not None:
+        try:
+            _pool_size = _pool.get_size()
+            _pool_idle = _pool.get_idle_size()
+            _pool_max = _pool.get_max_size()
+            _pool_used = _pool_size - _pool_idle
+            _pool_util = round(_pool_used / max(_pool_max, 1) * 100, 1)
+            _pool_stats_this_cycle = {
+                "size": _pool_size,
+                "idle": _pool_idle,
+                "used": _pool_used,
+                "max_size": _pool_max,
+                "utilization_pct": _pool_util,
+                "healthy": _pool_used < _pool_max,
+            }
+            if _pool_util >= POOL_HEALTH_WARN_THRESHOLD_PCT:
+                logger.warning(
+                    "Phase 8: DB pool utilization at %.1f%% (%d/%d connections used) — "
+                    "approaching exhaustion (threshold: %.0f%%)",
+                    _pool_util, _pool_used, _pool_max, POOL_HEALTH_WARN_THRESHOLD_PCT,
+                )
+            elif _pool_health_cycle_counter >= POOL_HEALTH_LOG_INTERVAL_CYCLES:
+                logger.info(
+                    "Phase 8: DB pool healthy — %.1f%% utilized (%d/%d connections)",
+                    _pool_util, _pool_used, _pool_max,
+                )
+        except Exception as e:
+            logger.warning("Phase 8: Failed to read pool stats: %s", e)
+            _pool_stats_this_cycle = {"error": str(e)}
+    if _pool_health_cycle_counter >= POOL_HEALTH_LOG_INTERVAL_CYCLES:
+        _pool_health_cycle_counter = 0
+    _phase_durations["phase8_pool_health"] = round(_time_mod.monotonic() - _phase_t0, 3)
+
     # ── Record cycle statistics ─────────────────────────────────────────
     _last_cycle_duration = _time_mod.monotonic() - _cycle_t0
     _entry = {
@@ -693,6 +739,7 @@ async def _poll_all_wallets_inner() -> None:
         "alerts_fired": _alerts_fired,
         "errors": _errors,
         "phase_durations_s": _phase_durations,
+        "pool": _pool_stats_this_cycle,
     }
     async with _cycle_stats_lock:
         _cycle_stats.append(_entry)
